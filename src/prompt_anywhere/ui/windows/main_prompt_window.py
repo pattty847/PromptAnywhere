@@ -668,7 +668,11 @@ class MainPromptWindow(QWidget):
             return
 
         self.prompt_submitted.emit(prompt, self.screenshot_bytes)
-        self.close()
+        # In embedded mode, the shell owns visibility.
+        if not self._embedded:
+            self.close()
+        else:
+            self.input_field.clear()
 
     def trigger_feature(self, feature_name: str):
         """Trigger a feature with current prompt"""
