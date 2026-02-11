@@ -28,6 +28,9 @@ class FixedBackgroundLabel(QLabel):
         return QSize(0, 0)
 
 
+from prompt_anywhere.ui.windows.result_window_actions import copy_to_clipboard, update_code_block_bar
+
+
 class ResultWindow(QWidget):
     """Result UI.
 
@@ -185,6 +188,62 @@ class ResultWindow(QWidget):
             title_layout.addWidget(close_btn)
             container_layout.addLayout(title_layout)
 
+        # Action row (minimal): copy last answer + stop streaming (wired later)
+        action_row = QHBoxLayout()
+        action_row.setContentsMargins(0, 0, 0, 0)
+        action_row.setSpacing(6)
+
+        self.copy_last_btn = QPushButton("Copy")
+        self.copy_last_btn.setFixedHeight(22)
+        self.copy_last_btn.setToolTip("Copy last assistant message")
+        self.copy_last_btn.setStyleSheet(
+            """
+            QPushButton {
+                background-color: rgba(50, 50, 50, 140);
+                color: rgba(255, 255, 255, 0.9);
+                border: 1px solid rgba(255, 255, 255, 0.15);
+                border-radius: 6px;
+                padding: 2px 10px;
+                font-family: 'Segoe UI', sans-serif;
+                font-size: 8.5pt;
+            }
+            QPushButton:hover {
+                background-color: rgba(70, 70, 70, 170);
+            }
+            """
+        )
+        self.copy_last_btn.clicked.connect(self.copy_last_assistant_message)
+
+        self.stop_btn = QPushButton("Stop")
+        self.stop_btn.setFixedHeight(22)
+        self.stop_btn.setToolTip("Stop streaming")
+        self.stop_btn.setEnabled(False)  # enabled when streaming starts
+        self.stop_btn.setStyleSheet(
+            """
+            QPushButton {
+                background-color: rgba(120, 40, 40, 120);
+                color: rgba(255, 255, 255, 0.9);
+                border: 1px solid rgba(255, 255, 255, 0.15);
+                border-radius: 6px;
+                padding: 2px 10px;
+                font-family: 'Segoe UI', sans-serif;
+                font-size: 8.5pt;
+            }
+            QPushButton:hover {
+                background-color: rgba(160, 60, 60, 150);
+            }
+            QPushButton:disabled {
+                background-color: rgba(60, 60, 60, 60);
+                color: rgba(255, 255, 255, 0.35);
+            }
+            """
+        )
+
+        action_row.addStretch(1)
+        action_row.addWidget(self.copy_last_btn)
+        action_row.addWidget(self.stop_btn)
+        container_layout.addLayout(action_row)
+
         self.text_display = QTextEdit()
         self.text_display.setReadOnly(True)
         self.text_display.setStyleSheet(
@@ -194,9 +253,10 @@ class ResultWindow(QWidget):
                 color: #FFFFFF;
                 border: 1px solid rgba(255, 157, 92, 0.3);
                 border-radius: 6px;
-                padding: 8px;
+                padding: 10px;
                 font-family: 'Segoe UI', sans-serif;
                 font-size: 10pt;
+                line-height: 1.3;
             }
             QTextEdit:focus {
                 border: 1px solid rgba(255, 157, 92, 0.6);
@@ -205,6 +265,17 @@ class ResultWindow(QWidget):
         )
         self.text_display.setPlainText("Loading...")
         container_layout.addWidget(self.text_display, stretch=1)
+
+        # Code block quick-copy buttons (only for latest assistant msg)
+        self.code_blocks_bar = QWidget()
+        self.code_blocks_bar.setVisible(False)
+        self.code_blocks_layout = QHBoxLayout()
+        self.code_blocks_layout.setContentsMargins(0, 0, 0, 0)
+        self.code_blocks_layout.setSpacing(6)
+        self.code_blocks_bar.setLayout(self.code_blocks_layout)
+        container_layout.addWidget(self.code_blocks_bar)
+
+        self._last_code_blocks: list[str] = []
 
         if self._show_followup_input:
             followup_row = QHBoxLayout()
@@ -301,15 +372,44 @@ class ResultWindow(QWidget):
 
     @Slot(str)
     def append_text(self, text):
-        """Append streaming text (thread-safe via Qt signal)."""
+        """Append streaming text (thread-safe via Qt signal).
+
+        Autoscroll policy: only stick to bottom if the user is already at bottom.
+        """
         self.clear_loading_placeholder()
+
+        vbar = self.text_display.verticalScrollBar()
+        was_at_bottom = (vbar.maximum() - vbar.value()) <= 6
+
         cursor = self.text_display.textCursor()
         cursor.movePosition(cursor.MoveOperation.End)
         cursor.insertText(text)
         self.text_display.setTextCursor(cursor)
-        self.text_display.ensureCursorVisible()
+
+        if was_at_bottom:
+            self.text_display.ensureCursorVisible()
+
         if self.active_assistant_index is not None:
             self.session_conversation[self.active_assistant_index]["content"] += text
+            self._refresh_code_block_buttons(self.session_conversation[self.active_assistant_index]["content"])
+
+    def _refresh_code_block_buttons(self, assistant_text: str) -> None:
+        """Rebuild code-block copy buttons for the latest assistant message."""
+        self._last_code_blocks = update_code_block_bar(
+            self.code_blocks_bar,
+            self.code_blocks_layout,
+            assistant_text,
+            on_copy=copy_to_clipboard,
+        )
+
+    def copy_last_assistant_message(self) -> None:
+        """Copy the most recent assistant message to clipboard."""
+        last = ""
+        for entry in reversed(self.session_conversation):
+            if entry.get("role") == "assistant":
+                last = entry.get("content") or ""
+                break
+        copy_to_clipboard(last)
 
     @Slot()
     def set_finished(self):
@@ -318,6 +418,7 @@ class ResultWindow(QWidget):
         cursor.movePosition(cursor.MoveOperation.End)
         self.text_display.setTextCursor(cursor)
         self.set_loading(False)
+        self.stop_btn.setEnabled(False)
         self.save_session()
 
     @Slot(str)
@@ -325,6 +426,7 @@ class ResultWindow(QWidget):
         """Display error message."""
         self.append_text(f"\n\nError: {error_msg}")
         self.set_loading(False)
+        self.stop_btn.setEnabled(False)
         self.save_session()
 
     def capture_followup_screenshot(self):
@@ -376,6 +478,8 @@ class ResultWindow(QWidget):
         self.session_conversation.append({"role": "assistant", "content": ""})
         self.active_assistant_index = len(self.session_conversation) - 1
         self.set_loading(True)
+        self.stop_btn.setEnabled(True)
+        self._refresh_code_block_buttons("")
 
     def build_prompt_with_history(self, new_prompt: str) -> str:
         """Build a prompt including conversation history for context."""
