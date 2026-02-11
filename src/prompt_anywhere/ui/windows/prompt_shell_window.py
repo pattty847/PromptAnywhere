@@ -312,10 +312,6 @@ class PromptShellWindow(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        # Skip expensive pixmap work during drawer animation;
-        # the finished handler will trigger a final resize anyway.
-        if self._drawer_anim is not None:
-            return
         self.update_background_pixmap()
 
     def _on_prompt_submitted(self, prompt: str, image_bytes: object) -> None:
@@ -401,9 +397,6 @@ class PromptShellWindow(QWidget):
         if self._saved_min_height is None:
             self._saved_min_height = self.minimumHeight()
         self.setMinimumHeight(0)
-        # Pin prompt widget height so the layout can't stretch it to fill
-        # intermediate gaps between drawer shrink and shell resize.
-        self.prompt_widget.setFixedHeight(self.prompt_widget.height())
 
     def _end_drawer_transition(self) -> None:
         """Restore constraints after animation completes."""
@@ -414,12 +407,6 @@ class PromptShellWindow(QWidget):
         if self._saved_min_height is not None:
             self.setMinimumHeight(self._saved_min_height)
         self._saved_min_height = None
-        # Unpin prompt widget so it can size normally again.
-        self.prompt_widget.setMinimumHeight(self.prompt_widget.minimumSizeHint().height())
-        self.prompt_widget.setMaximumHeight(16777215)
-        # Refresh background now that animation is done.
-        self._drawer_anim = None
-        self.update_background_pixmap()
 
     def _on_drawer_anim_value_changed(self, value) -> None:
         """Keep bottom fixed during animation and optionally trace frame states."""

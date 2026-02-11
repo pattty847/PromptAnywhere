@@ -47,3 +47,6 @@ uv.lock
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# Docs
+docs/imgs/
