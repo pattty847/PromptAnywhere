@@ -46,7 +46,7 @@ class Config:
         """Return default configuration"""
         return {
             "hotkey": "Ctrl+Alt+X",
-            "default_agent": "gemini",
+            "default_agent": "codex",
             "theme": "default"
         }
     

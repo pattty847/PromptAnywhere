@@ -36,7 +36,7 @@ pip install -e .
 ### Run
 
 ```bash
-python run_run_prompt_anywhere.py
+python -m prompt_anywhere
 ```
 
 Press `Ctrl+Alt+X` anywhere to open the prompt window.

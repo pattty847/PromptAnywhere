@@ -9,7 +9,7 @@ from threading import Thread
 # Import pynput-dependent core before PySide6 to avoid shibokensupport/six conflict
 from prompt_anywhere.core.app import App
 
-from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
+from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QMessageBox
 from PySide6.QtCore import Qt, QObject, Signal, Slot, QTimer
 from PySide6.QtGui import QColor, QIcon, QPixmap, QCursor
 
@@ -240,7 +240,17 @@ class PromptAnywhereApp:
             self.worker = MockAgentWorker(prompt, image_bytes)
         else:
             # Get agent from core app
-            agent = self.core_app.get_agent()
+            try:
+                agent = self.core_app.get_agent()
+            except Exception as e:
+                error_text = str(e)
+                chat.show_error(error_text)
+                QMessageBox.critical(
+                    self.shell_window,
+                    "Agent Not Available",
+                    error_text,
+                )
+                return
             self.worker = AgentWorker(agent, history_prompt, image_bytes)
 
         chat = self.shell_window.result_widget
