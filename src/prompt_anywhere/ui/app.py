@@ -11,6 +11,7 @@ from prompt_anywhere.ui.windows.prompt_window import PromptInputWindow
 from prompt_anywhere.ui.windows.main_prompt_window import MainPromptWindow
 from prompt_anywhere.ui.windows.result_window import ResultWindow
 from prompt_anywhere.ui.windows.history_window import HistoryWindow
+from prompt_anywhere.ui.windows.prompt_shell_window import PromptShellWindow
 from prompt_anywhere.core.app import App
 from prompt_anywhere.core.agents.base_agent import BaseAgent
 from prompt_anywhere.core.features import (
@@ -62,8 +63,8 @@ class PromptAnywhereApp:
     def __init__(self):
         self.app = QApplication.instance() or QApplication(sys.argv)
         self.app.setQuitOnLastWindowClosed(False)  # Keep running when windows close
-        self.prompt_window: Optional[MainPromptWindow] = None
-        self.result_window: Optional[ResultWindow] = None
+        self.shell_window: Optional[PromptShellWindow] = None
+        self.result_window: Optional[ResultWindow] = None  # legacy (unused once drawer lands)
         self.history_window: Optional[HistoryWindow] = None
         self.worker: Optional[AgentWorker] = None
 
@@ -127,18 +128,18 @@ class PromptAnywhereApp:
             self.show_prompt_window()
     
     def show_prompt_window(self):
-        """Display main prompt window"""
-        # Close existing prompt window if open
-        if self.prompt_window:
-            self.prompt_window.close()
+        """Display PromptAnywhere shell window."""
+        if not self.shell_window:
+            self.shell_window = PromptShellWindow()
+            self.shell_window.prompt_submitted.connect(self.process_prompt)
+            self.shell_window.follow_up_submitted.connect(self.process_prompt)
+            self.shell_window.feature_triggered.connect(self.handle_feature)
+            self.shell_window.session_closed.connect(self.on_result_window_closed)
 
-        self.prompt_window = MainPromptWindow()
-        self.prompt_window.prompt_submitted.connect(self.process_prompt)
-        self.prompt_window.feature_triggered.connect(self.handle_feature)
-
-        self.prompt_window.show()
-        self.prompt_window.raise_()
-        self.prompt_window.activateWindow()
+        self.shell_window.show()
+        self.shell_window.raise_()
+        self.shell_window.activateWindow()
+        self.shell_window.focus_input()
     
     @Slot(str, str)
     def handle_feature(self, feature_name: str, prompt: str):
@@ -168,28 +169,29 @@ class PromptAnywhereApp:
     def process_prompt(self, prompt, image_bytes):
         """Process submitted prompt"""
         print(f"Processing prompt: {prompt[:50]}...")
-        self.prompt_window = None
 
-        # Create or reuse result window
-        if not self.result_window:
-            self.result_window = ResultWindow()
-            self.result_window.follow_up_submitted.connect(self.process_prompt)
-            self.result_window.session_closed.connect(self.on_result_window_closed)
-        self.result_window.ensure_session()
+        # Route all transcript rendering into the shell drawer.
+        if not self.shell_window:
+            # Shouldn't happen, but keep it safe.
+            self.show_prompt_window()
 
-        history_prompt = self.result_window.build_prompt_with_history(prompt)
-        self.result_window.add_user_message(prompt)
-        self.result_window.start_assistant_message()
-        self.result_window.show()
+        chat = self.shell_window.result_widget
+        chat.ensure_session()
+
+        history_prompt = chat.build_prompt_with_history(prompt)
+        chat.add_user_message(prompt)
+        chat.start_assistant_message()
+        self.shell_window.open_drawer(animated=True)
 
         # Get agent from core app
         agent = self.core_app.get_agent()
 
         # Start agent worker
         self.worker = AgentWorker(agent, history_prompt, image_bytes)
-        self.worker.signals.text_chunk.connect(self.result_window.append_text)
-        self.worker.signals.finished.connect(self.result_window.set_finished)
-        self.worker.signals.error.connect(self.result_window.show_error)
+        chat = self.shell_window.result_widget
+        self.worker.signals.text_chunk.connect(chat.append_text)
+        self.worker.signals.finished.connect(chat.set_finished)
+        self.worker.signals.error.connect(chat.show_error)
         self.worker.start()
 
     def show_history_window(self):
@@ -197,19 +199,20 @@ class PromptAnywhereApp:
         if not self.history_window:
             self.history_window = HistoryWindow()
             self.history_window.session_selected.connect(self.open_history_session)
-        if self.result_window:
-            self.result_window.load_sessions()
-            self.history_window.set_sessions(self.result_window.saved_sessions)
+        if self.shell_window:
+            chat = self.shell_window.result_widget
+            chat.load_sessions()
+            self.history_window.set_sessions(chat.saved_sessions)
         self.history_window.show()
 
     def open_history_session(self, session_id: str):
         """Open a saved session in the result window."""
-        if not self.result_window:
-            self.result_window = ResultWindow()
-            self.result_window.follow_up_submitted.connect(self.process_prompt)
-            self.result_window.session_closed.connect(self.on_result_window_closed)
-        self.result_window.load_session(session_id)
-        self.result_window.show()
+        if not self.shell_window:
+            self.show_prompt_window()
+        chat = self.shell_window.result_widget
+        chat.load_session(session_id)
+        self.shell_window.open_drawer(animated=False)
+        self.shell_window.show()
 
     def on_result_window_closed(self):
         """Refresh history window after session close."""

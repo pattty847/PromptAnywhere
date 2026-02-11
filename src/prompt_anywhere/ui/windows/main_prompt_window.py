@@ -19,19 +19,26 @@ class FixedBackgroundLabel(QLabel):
 
 
 class MainPromptWindow(QWidget):
-    """Main prompt window with feature buttons"""
+    """Main prompt UI.
+
+    When `embedded=True`, the widget is meant to be hosted inside another window
+    (e.g., PromptShellWindow) and should not set top-level window flags or
+    reposition itself.
+    """
 
     prompt_submitted = Signal(str, object)  # prompt, image_bytes
     feature_triggered = Signal(str, str)  # feature_name, prompt
 
-    def __init__(self):
+    def __init__(self, embedded: bool = False):
         super().__init__()
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint |
-            Qt.WindowType.WindowStaysOnTopHint |
-            Qt.WindowType.Tool
-        )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._embedded = embedded
+        if not embedded:
+            self.setWindowFlags(
+                Qt.WindowType.FramelessWindowHint |
+                Qt.WindowType.WindowStaysOnTopHint |
+                Qt.WindowType.Tool
+            )
+            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.min_window_size = QSize(650, 200)
         self.setMinimumSize(self.min_window_size)
         self.font_scale = 2
@@ -44,16 +51,18 @@ class MainPromptWindow(QWidget):
         self.feature_hotkey_labels = []
         self.feature_icon_labels = []
 
-        # Position at center of screen
-        self.center_on_screen()
+        # Position at center of screen (top-level mode only)
+        if not self._embedded:
+            self.center_on_screen()
 
         self.screenshot_bytes = None
         self.screenshot_overlay = None
         self.drag_position = None
 
         self.setup_ui()
-        self.apply_blur_effect()
-        self.update_window_mask()
+        if not self._embedded:
+            self.apply_blur_effect()
+            self.update_window_mask()
 
     def center_on_screen(self):
         """Center window on screen"""

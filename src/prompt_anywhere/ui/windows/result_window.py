@@ -19,28 +19,40 @@ class FixedBackgroundLabel(QLabel):
 
 
 class ResultWindow(QWidget):
-    """Result window with streaming response and follow-up input"""
+    """Result UI.
+
+    When `embedded=True`, the widget is meant to be hosted inside another window
+    (e.g., PromptShellWindow) and should not set top-level window flags or
+    reposition itself.
+    """
     follow_up_submitted = Signal(str, object)  # prompt, image_bytes
     session_closed = Signal()
     
-    def __init__(self):
+    def __init__(self, embedded: bool = False):
         super().__init__()
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint |
-            Qt.WindowType.WindowStaysOnTopHint |
-            Qt.WindowType.Tool
-        )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setFixedSize(900, 600)
+        self._embedded = embedded
+        if not embedded:
+            self.setWindowFlags(
+                Qt.WindowType.FramelessWindowHint |
+                Qt.WindowType.WindowStaysOnTopHint |
+                Qt.WindowType.Tool
+            )
+            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+            self.setFixedSize(900, 600)
+        else:
+            # Embedded: let the parent layout drive size.
+            self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            self.setMinimumHeight(240)
         self.session_id = None
         self.session_conversation = []
         self.saved_sessions = []
         self.active_assistant_index = None
         self.history_path = self.get_history_path()
         
-        # Position at cursor
-        cursor_pos = QCursor.pos()
-        self.move(cursor_pos.x() - 300, cursor_pos.y() - 250)
+        # Position at cursor (top-level mode only)
+        if not self._embedded:
+            cursor_pos = QCursor.pos()
+            self.move(cursor_pos.x() - 300, cursor_pos.y() - 250)
         
         self.screenshot_bytes = None
         self.screenshot_overlay = None
@@ -48,7 +60,8 @@ class ResultWindow(QWidget):
         
         self.setup_ui()
         self.load_sessions()
-        self.update_background_pixmap()
+        if not self._embedded:
+            self.update_background_pixmap()
     
     def setup_ui(self):
         """Create UI elements"""
@@ -434,7 +447,8 @@ class ResultWindow(QWidget):
     def resizeEvent(self, event):
         """Keep background image in sync with window size."""
         super().resizeEvent(event)
-        self.update_background_pixmap()
+        if not self._embedded:
+            self.update_background_pixmap()
 
     def closeEvent(self, event):
         """Mark session end on close."""
