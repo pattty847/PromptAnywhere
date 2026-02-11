@@ -1,6 +1,11 @@
 # PromptAnywhere
 
-Global hotkey AI assistant powered by Gemini CLI. Press `Ctrl+Alt+X` anywhere on Windows to open a prompt window, ask questions, attach screenshots, and get instant AI responses.
+Global hotkey AI assistant powered by Codex/Gemini/Claude CLI. Press `Ctrl+Alt+X` anywhere on Windows to open a prompt window, ask questions, attach screenshots, and get instant AI responses.
+
+<p align="center">
+  <img width="600" alt="image" src="https://github.com/user-attachments/assets/2dd66e7c-7cf3-4d3c-92ff-6de52114a9a4" />
+  <img width="600" alt="image" src="https://github.com/user-attachments/assets/e9457d34-930c-42b2-8e91-b447d27355aa" />
+</p>
 
 ## Quick Start
 
