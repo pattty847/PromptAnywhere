@@ -3,6 +3,10 @@ import sys
 import signal
 from typing import Optional
 from threading import Thread
+
+# Import pynput-dependent core before PySide6 to avoid shibokensupport/six conflict
+from prompt_anywhere.core.app import App
+
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
 from PySide6.QtCore import Qt, QObject, Signal, Slot, QTimer
 from PySide6.QtGui import QColor, QIcon, QPixmap, QCursor
@@ -12,7 +16,6 @@ from prompt_anywhere.ui.windows.main_prompt_window import MainPromptWindow
 from prompt_anywhere.ui.windows.result_window import ResultWindow
 from prompt_anywhere.ui.windows.history_window import HistoryWindow
 from prompt_anywhere.ui.windows.prompt_shell_window import PromptShellWindow
-from prompt_anywhere.core.app import App
 from prompt_anywhere.core.agents.base_agent import BaseAgent
 from prompt_anywhere.core.features import (
     GoogleSearchFeature, FileSearchFeature, BrowserFeature,

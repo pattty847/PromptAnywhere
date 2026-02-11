@@ -677,12 +677,16 @@ class MainPromptWindow(QWidget):
         # Don't close the window for features, let them execute
 
     def mousePressEvent(self, event):
-        """Enable window dragging"""
+        """Enable window dragging (top-level only)."""
+        if self._embedded:
+            return super().mousePressEvent(event)
         if event.button() == Qt.MouseButton.LeftButton:
             self.drag_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
 
     def mouseMoveEvent(self, event):
-        """Handle window dragging"""
+        """Handle window dragging (top-level only)."""
+        if self._embedded:
+            return super().mouseMoveEvent(event)
         if event.buttons() == Qt.MouseButton.LeftButton and self.drag_position:
             self.move(event.globalPosition().toPoint() - self.drag_position)
 

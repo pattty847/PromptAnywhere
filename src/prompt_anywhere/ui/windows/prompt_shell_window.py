@@ -17,7 +17,10 @@ from prompt_anywhere.ui.windows.result_window import ResultWindow
 
 
 class PromptShellWindow(QWidget):
-    """Main always-on-top window containing prompt + drawer."""
+    """Main always-on-top window containing prompt + drawer.
+
+    Owns window dragging when embedded children are used.
+    """
 
     prompt_submitted = Signal(str, object)  # prompt, image_bytes
     feature_triggered = Signal(str, str)  # feature_name, prompt
@@ -135,6 +138,20 @@ class PromptShellWindow(QWidget):
 
     def focus_input(self) -> None:
         self.prompt_widget.input_field.setFocus()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() == Qt.MouseButton.LeftButton and getattr(self, "_drag_pos", None) is not None:
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:
