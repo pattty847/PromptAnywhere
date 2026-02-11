@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import time
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QEasingCurve, QEvent, Qt, Signal, QSize, QVariantAnimation
@@ -200,6 +201,7 @@ class PromptShellWindow(QWidget):
         self.setMinimumWidth(self.prompt_widget.window_width)
         self.resize(self.prompt_widget.window_width, self.prompt_widget.window_height + 24)
         self.adjustSize()
+        self.update_window_mask()
         self.update_background_pixmap()
         self._setup_ui_debugging()
         self._debug_dump_layout("initialized")
@@ -312,7 +314,19 @@ class PromptShellWindow(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self.update_window_mask()
         self.update_background_pixmap()
+
+    def update_window_mask(self) -> None:
+        """Clip shell to rounded corners so background image doesn't bleed at edges."""
+        from PySide6.QtGui import QPainterPath, QRegion
+
+        radius = 16
+        rect = self.rect()
+        path = QPainterPath()
+        path.addRoundedRect(rect, radius, radius)
+        region = QRegion(path.toFillPolygon().toPolygon())
+        self.setMask(region)
 
     def _on_prompt_submitted(self, prompt: str, image_bytes: object) -> None:
         self.open_drawer(animated=True)
@@ -468,7 +482,7 @@ class PromptShellWindow(QWidget):
             }
             """
         )
-        back_btn.clicked.connect(self.exit_history_mode)
+        back_btn.clicked.connect(lambda _checked=False: self.exit_history_mode(animated=True))
         header.addWidget(back_btn)
 
         title = QLabel("History")
@@ -489,6 +503,8 @@ class PromptShellWindow(QWidget):
         layout.addLayout(header)
 
         self.history_list = QListWidget()
+        self.history_list.setWordWrap(True)
+        self.history_list.setUniformItemSizes(False)
         self.history_list.setStyleSheet(
             """
             QListWidget {
@@ -501,7 +517,7 @@ class PromptShellWindow(QWidget):
                 font-size: 9pt;
             }
             QListWidget::item {
-                padding: 4px;
+                padding: 6px 4px;
             }
             QListWidget::item:selected {
                 background-color: rgba(255, 157, 92, 0.2);
@@ -518,13 +534,59 @@ class PromptShellWindow(QWidget):
     def set_history_sessions(self, sessions: list[dict]) -> None:
         """Populate the in-drawer history list."""
         self.history_list.clear()
-        for session in sessions:
-            created_at = session.get("created_at", "")
+        sorted_sessions = sorted(
+            sessions,
+            key=lambda session: self._session_sort_key(session),
+            reverse=True,
+        )
+        for session in sorted_sessions:
             msg_count = len(session.get("messages", []))
-            label = f"{created_at} ({msg_count} messages)"
+            ts_raw = session.get("updated_at") or session.get("created_at") or ""
+            timestamp = self._format_session_timestamp(ts_raw)
+            preview = self._session_preview(session)
+            label = f"{timestamp}  ({msg_count} messages)\n{preview}"
             item = QListWidgetItem(label)
             item.setData(Qt.ItemDataRole.UserRole, session.get("id"))
             self.history_list.addItem(item)
+
+    def _session_sort_key(self, session: dict) -> datetime:
+        """Sort sessions by latest activity timestamp."""
+        ts_raw = session.get("updated_at") or session.get("created_at") or ""
+        parsed = self._parse_session_datetime(ts_raw)
+        if parsed is not None:
+            return parsed
+        return datetime.min
+
+    def _parse_session_datetime(self, raw_value: str) -> datetime | None:
+        """Parse ISO-like timestamps used by saved sessions."""
+        if not raw_value:
+            return None
+        try:
+            return datetime.fromisoformat(str(raw_value))
+        except ValueError:
+            return None
+
+    def _format_session_timestamp(self, raw_value: str) -> str:
+        """Format session timestamp for history list display."""
+        parsed = self._parse_session_datetime(raw_value)
+        if parsed is None:
+            return str(raw_value) if raw_value else "Unknown time"
+        return parsed.strftime("%b %d, %Y %I:%M %p")
+
+    def _session_preview(self, session: dict) -> str:
+        """Return a concise preview line for a session."""
+        messages = session.get("messages", [])
+        first_user = ""
+        for entry in messages:
+            if entry.get("role") == "user":
+                first_user = (entry.get("content") or "").strip()
+                break
+        if not first_user:
+            return "No prompt preview"
+        compact = " ".join(first_user.split())
+        if len(compact) > 90:
+            return f"{compact[:87]}..."
+        return compact
 
     def show_history_mode(self, animated: bool = True) -> None:
         """Switch drawer content to history list."""
