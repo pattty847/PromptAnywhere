@@ -79,6 +79,10 @@ class PromptShellWindow(QWidget):
         self.result_widget.follow_up_submitted.connect(self.follow_up_submitted)
         self.result_widget.session_closed.connect(self.session_closed)
 
+        # Default sizing: make it wide enough for the feature grid.
+        self.setMinimumWidth(900)
+        self.resize(900, 240)
+
         # Size: start as prompt height, drawer hidden
         self.adjustSize()
 
@@ -153,6 +157,11 @@ class PromptShellWindow(QWidget):
             return
         super().mouseMoveEvent(event)
 
+    def closeEvent(self, event):
+        """Hide instead of closing so the hotkey can re-open instantly."""
+        self.hide()
+        event.ignore()
+
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:
             if self._drawer_open:
@@ -160,7 +169,7 @@ class PromptShellWindow(QWidget):
                 self.focus_input()
                 event.accept()
                 return
-            self.close()
+            self.hide()
             event.accept()
             return
         super().keyPressEvent(event)

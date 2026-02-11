@@ -39,7 +39,7 @@ class MainPromptWindow(QWidget):
                 Qt.WindowType.Tool
             )
             self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.min_window_size = QSize(650, 200)
+        self.min_window_size = QSize(900, 200)
         self.setMinimumSize(self.min_window_size)
         self.font_scale = 2
         self.min_font_scale = -1
@@ -695,6 +695,13 @@ class MainPromptWindow(QWidget):
             self.move(event.globalPosition().toPoint() - self.drag_position)
 
     def keyPressEvent(self, event):
-        """ESC to close"""
+        """ESC behavior.
+
+        - Embedded: let the shell handle ESC.
+        - Top-level: close the window.
+        """
         if event.key() == Qt.Key.Key_Escape:
-            self.close()
+            if not self._embedded:
+                self.close()
+            event.accept()
+            return
