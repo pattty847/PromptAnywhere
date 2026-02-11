@@ -66,17 +66,24 @@ class GeminiAgent(BaseAgent):
                 cmd = ['cmd', '/c', gemini_cmd, '-p', prompt_arg]
             else:
                 cmd = [gemini_cmd, '-p', prompt_arg]
-            
+
+            popen_kwargs = {
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.PIPE,
+                "text": True,
+                "bufsize": 1,
+                "universal_newlines": True,
+                "shell": False,
+            }
+            if sys.platform == "win32":
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = 0  # SW_HIDE
+                popen_kwargs["startupinfo"] = startupinfo
+                popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
             # Run subprocess with streaming output
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-                universal_newlines=True,
-                shell=False
-            )
+            process = subprocess.Popen(cmd, **popen_kwargs)
             
             # Stream output line by line
             for line in iter(process.stdout.readline, ''):

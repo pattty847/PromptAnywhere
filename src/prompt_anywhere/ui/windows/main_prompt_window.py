@@ -29,9 +29,10 @@ class MainPromptWindow(QWidget):
     prompt_submitted = Signal(str, object)  # prompt, image_bytes
     feature_triggered = Signal(str, str)  # feature_name, prompt
 
-    def __init__(self, embedded: bool = False):
+    def __init__(self, embedded: bool = False, show_chrome: bool = True):
         super().__init__()
         self._embedded = embedded
+        self._show_chrome = show_chrome
         if not embedded:
             self.setWindowFlags(
                 Qt.WindowType.FramelessWindowHint |
@@ -39,7 +40,9 @@ class MainPromptWindow(QWidget):
                 Qt.WindowType.Tool
             )
             self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.min_window_size = QSize(900, 200)
+        self.window_width = 600
+        self.window_height = 200
+        self.min_window_size = QSize(self.window_width, self.window_height)
         self.setMinimumSize(self.min_window_size)
         self.font_scale = 2
         self.min_font_scale = -1
@@ -62,7 +65,8 @@ class MainPromptWindow(QWidget):
         self.setup_ui()
         if not self._embedded:
             self.apply_blur_effect()
-            self.update_window_mask()
+            if self._show_chrome:
+                self.update_window_mask()
 
     def center_on_screen(self):
         """Center window on screen"""
@@ -79,52 +83,63 @@ class MainPromptWindow(QWidget):
         layout.setSpacing(0)
         layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
 
-        # Main container
-        self.container = QWidget()
-        self.container.setStyleSheet("""
-            QWidget {
-                background-color: transparent;
-                border-radius: 16px;
-                border: 1px solid rgba(255, 255, 255, 0.1);
-            }
-        """)
+        if self._show_chrome:
+            # Main container
+            self.container = QWidget()
+            self.container.setStyleSheet("""
+                QWidget {
+                    background-color: transparent;
+                    border-radius: 16px;
+                    border: 1px solid rgba(255, 255, 255, 0.1);
+                }
+            """)
 
-        self.background_label = FixedBackgroundLabel()
-        self.background_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.background_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
-        self.background_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.background_pixmap = QPixmap(self.get_background_path())
+            self.background_label = FixedBackgroundLabel()
+            self.background_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.background_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+            self.background_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            self.background_pixmap = QPixmap(self.get_background_path())
 
-        self.content_widget = QWidget()
-        self.content_widget.setStyleSheet("""
-            QWidget {
-                background-color: rgba(15, 15, 15, 140);
-                border-radius: 16px;
-            }
-        """)
+            self.content_widget = QWidget()
+            self.content_widget.setStyleSheet("""
+                QWidget {
+                    background-color: rgba(15, 15, 15, 140);
+                    border-radius: 16px;
+                }
+            """)
+        else:
+            self.container = self
+            self.background_pixmap = QPixmap()
+            self.content_widget = QWidget()
+            self.content_widget.setStyleSheet("QWidget { background: transparent; border: none; }")
 
         container_layout = QVBoxLayout()
-        container_layout.setContentsMargins(10, 8, 10, 8)
+        if self._show_chrome:
+            container_layout.setContentsMargins(4, 4, 4, 4)
+        else:
+            # Embedded in shell: keep content close to shell edges.
+            container_layout.setContentsMargins(4, 4, 4, 4)
         container_layout.setSpacing(4)
 
-        # Header row with title and close button
-        header_layout = QHBoxLayout()
-        header_layout.setContentsMargins(0, 0, 0, 0)
-        header_layout.setSpacing(0)
+        # Header row with title and close button (top-level chrome mode).
+        if self._show_chrome:
+            header_layout = QHBoxLayout()
+            header_layout.setContentsMargins(0, 0, 0, 0)
+            header_layout.setSpacing(0)
 
-        self.title_label = QLabel("Prompt Anywhere")
-        self.title_label.setStyleSheet(self.title_label_stylesheet())
-        header_layout.addWidget(self.title_label)
-        header_layout.addStretch()
+            self.title_label = QLabel("Prompt Anywhere")
+            self.title_label.setStyleSheet(self.title_label_stylesheet())
+            header_layout.addWidget(self.title_label)
+            header_layout.addStretch()
 
-        # Close button
-        self.close_btn = QPushButton("X")
-        self.close_btn.setFixedSize(20, 20)
-        self.close_btn.setStyleSheet(self.close_button_stylesheet())
-        self.close_btn.clicked.connect(self.close)
-        header_layout.addWidget(self.close_btn)
+            # Close button
+            self.close_btn = QPushButton("X")
+            self.close_btn.setFixedSize(20, 20)
+            self.close_btn.setStyleSheet(self.close_button_stylesheet())
+            self.close_btn.clicked.connect(self.close)
+            header_layout.addWidget(self.close_btn)
 
-        container_layout.addLayout(header_layout)
+            container_layout.addLayout(header_layout)
 
         # Input row with utility buttons
         input_row_layout = QHBoxLayout()
@@ -207,7 +222,7 @@ class MainPromptWindow(QWidget):
             }
         """)
         feature_container_layout = QVBoxLayout()
-        feature_container_layout.setContentsMargins(6, 6, 6, 6)
+        feature_container_layout.setContentsMargins(5, 5, 5, 5)
         feature_container_layout.setSpacing(0)
         feature_container_layout.addLayout(features_grid)
         feature_container.setLayout(feature_container_layout)
@@ -246,17 +261,21 @@ class MainPromptWindow(QWidget):
 
         self.content_widget.setLayout(container_layout)
 
-        container_stack = QStackedLayout()
-        container_stack.setContentsMargins(0, 0, 0, 0)
-        container_stack.setStackingMode(QStackedLayout.StackingMode.StackAll)
-        container_stack.addWidget(self.background_label)
-        container_stack.addWidget(self.content_widget)
-        self.container.setLayout(container_stack)
-        layout.addWidget(self.container)
+        if self._show_chrome:
+            container_stack = QStackedLayout()
+            container_stack.setContentsMargins(0, 0, 0, 0)
+            container_stack.setStackingMode(QStackedLayout.StackingMode.StackAll)
+            container_stack.addWidget(self.background_label)
+            container_stack.addWidget(self.content_widget)
+            self.container.setLayout(container_stack)
+            layout.addWidget(self.container)
+        else:
+            layout.addWidget(self.content_widget)
         self.setLayout(layout)
         self.apply_font_scale()
         self.resize_to_contents()
-        self.update_background_pixmap()
+        if self._show_chrome:
+            self.update_background_pixmap()
 
         # Focus input field
         self.input_field.setFocus()
@@ -354,6 +373,8 @@ class MainPromptWindow(QWidget):
 
     def update_background_pixmap(self):
         """Scale and apply the background image to the container."""
+        if not self._show_chrome:
+            return
         if self.background_pixmap.isNull():
             return
         target_size = self.container.size()
@@ -578,11 +599,12 @@ class MainPromptWindow(QWidget):
 
     def apply_font_scale(self):
         """Apply the current font scale to all widgets."""
-        self.title_label.setStyleSheet(self.title_label_stylesheet())
-        self.close_btn.setStyleSheet(self.close_button_stylesheet())
-        self.close_btn.setFixedSize(self.scaled_height(20), self.scaled_height(20))
-        self.set_button_icon(self.close_btn, self.get_icon_name("close"), self.scaled_icon_size(12))
-        self.close_btn.setText("")
+        if self._show_chrome:
+            self.title_label.setStyleSheet(self.title_label_stylesheet())
+            self.close_btn.setStyleSheet(self.close_button_stylesheet())
+            self.close_btn.setFixedSize(self.scaled_height(20), self.scaled_height(20))
+            self.set_button_icon(self.close_btn, self.get_icon_name("close"), self.scaled_icon_size(12))
+            self.close_btn.setText("")
 
         self.input_field.setStyleSheet(self.input_stylesheet())
         self.input_field.setFixedHeight(self.scaled_height(32))
@@ -626,18 +648,25 @@ class MainPromptWindow(QWidget):
         target_width = max(current_size.width(), self.min_window_size.width())
         target_height = max(current_size.height(), self.min_window_size.height())
         self.resize(target_width, target_height)
-        self.center_on_screen()
-        self.update_background_pixmap()
-        self.update_window_mask()
+        if not self._embedded:
+            self.center_on_screen()
+        if self._show_chrome:
+            self.update_background_pixmap()
+        if not self._embedded and self._show_chrome:
+            self.update_window_mask()
 
     def resizeEvent(self, event):
         """Keep rounded window mask in sync with size."""
         super().resizeEvent(event)
-        self.update_background_pixmap()
-        self.update_window_mask()
+        if self._show_chrome:
+            self.update_background_pixmap()
+        if not self._embedded and self._show_chrome:
+            self.update_window_mask()
 
     def update_window_mask(self):
         """Apply rounded corner mask to remove square edges."""
+        if not self._show_chrome:
+            return
         from PySide6.QtGui import QPainterPath, QRegion
         radius = 16
         rect = self.rect()
@@ -648,7 +677,8 @@ class MainPromptWindow(QWidget):
 
     def capture_screenshot(self):
         """Open screenshot overlay"""
-        self.hide()
+        window_to_hide = self.window() if self._embedded else self
+        window_to_hide.hide()
         self.screenshot_overlay = ScreenshotOverlay()
         self.screenshot_overlay.screenshot_taken.connect(self.on_screenshot_captured)
         self.screenshot_overlay.show()
@@ -658,7 +688,8 @@ class MainPromptWindow(QWidget):
         """Handle captured screenshot"""
         self.screenshot_bytes = image_bytes
         self.screenshot_overlay = None
-        self.show()
+        window_to_show = self.window() if self._embedded else self
+        window_to_show.show()
         self.input_field.setFocus()
 
     def submit_prompt(self):
@@ -705,3 +736,4 @@ class MainPromptWindow(QWidget):
                 self.close()
             event.accept()
             return
+        super().keyPressEvent(event)

@@ -1,6 +1,8 @@
 """Main GUI application coordinator"""
+import os
 import sys
 import signal
+import time
 from typing import Optional
 from threading import Thread
 
@@ -11,10 +13,7 @@ from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
 from PySide6.QtCore import Qt, QObject, Signal, Slot, QTimer
 from PySide6.QtGui import QColor, QIcon, QPixmap, QCursor
 
-from prompt_anywhere.ui.windows.prompt_window import PromptInputWindow
-from prompt_anywhere.ui.windows.main_prompt_window import MainPromptWindow
 from prompt_anywhere.ui.windows.result_window import ResultWindow
-from prompt_anywhere.ui.windows.history_window import HistoryWindow
 from prompt_anywhere.ui.windows.prompt_shell_window import PromptShellWindow
 from prompt_anywhere.core.agents.base_agent import BaseAgent
 from prompt_anywhere.core.features import (
@@ -55,6 +54,34 @@ class AgentWorker(Thread):
             self.signals.error.emit(str(e))
 
 
+class MockAgentWorker(Thread):
+    """Background worker that streams fake text for UI iteration."""
+
+    def __init__(self, prompt: str, image_bytes=None):
+        super().__init__(daemon=True)
+        self.prompt = prompt
+        self.image_bytes = image_bytes
+        self.signals = StreamSignals()
+
+    def run(self):
+        """Stream mock chunks that resemble real output pacing."""
+        try:
+            attachment_note = " with screenshot context" if self.image_bytes else ""
+            chunks = [
+                "Mock mode is enabled.\n\n",
+                f"I received your prompt{attachment_note}: ",
+                f"\"{self.prompt[:120]}\".\n\n",
+                "This is a simulated streaming response so you can test drawer layout, sizing, and animation quickly.\n\n",
+                "Disable Mock Response Mode from the tray menu when you want real agent output again.",
+            ]
+            for chunk in chunks:
+                self.signals.text_chunk.emit(chunk)
+                time.sleep(0.08)
+            self.signals.finished.emit()
+        except Exception as e:
+            self.signals.error.emit(str(e))
+
+
 class HotkeySignals(QObject):
     """Signals for hotkey communication"""
     triggered = Signal()
@@ -68,8 +95,8 @@ class PromptAnywhereApp:
         self.app.setQuitOnLastWindowClosed(False)  # Keep running when windows close
         self.shell_window: Optional[PromptShellWindow] = None
         self.result_window: Optional[ResultWindow] = None  # legacy (unused once drawer lands)
-        self.history_window: Optional[HistoryWindow] = None
-        self.worker: Optional[AgentWorker] = None
+        self.worker: Optional[Thread] = None
+        self.mock_response_mode = self._is_mock_mode_enabled_by_default()
 
         # Initialize core app (pure Python)
         self.core_app = App()
@@ -94,6 +121,12 @@ class PromptAnywhereApp:
         self.core_app.register_hotkey(self._on_hotkey_triggered)
 
         self.setup_system_tray()
+        print(f"Mock response mode: {'ON' if self.mock_response_mode else 'OFF'}")
+
+    def _is_mock_mode_enabled_by_default(self) -> bool:
+        """Read mock mode from environment (defaults ON for UI iteration)."""
+        raw = os.environ.get("PROMPT_ANYWHERE_MOCK_MODE", "1").strip().lower()
+        return raw not in {"0", "false", "off", "no"}
     
     def _on_hotkey_triggered(self):
         """Hotkey callback - must be thread-safe"""
@@ -117,6 +150,13 @@ class PromptAnywhereApp:
         open_action.triggered.connect(self.show_prompt_window)
         
         tray_menu.addSeparator()
+
+        self.mock_mode_action = tray_menu.addAction("Mock Response Mode")
+        self.mock_mode_action.setCheckable(True)
+        self.mock_mode_action.setChecked(self.mock_response_mode)
+        self.mock_mode_action.triggered.connect(self.on_mock_mode_toggled)
+
+        tray_menu.addSeparator()
         
         quit_action = tray_menu.addAction("Quit")
         quit_action.triggered.connect(self.app.quit)
@@ -124,6 +164,11 @@ class PromptAnywhereApp:
         self.tray_icon.setContextMenu(tray_menu)
         self.tray_icon.activated.connect(self.on_tray_activated)
         self.tray_icon.show()
+
+    def on_mock_mode_toggled(self, checked: bool):
+        """Enable/disable fake streaming responses for UI testing."""
+        self.mock_response_mode = checked
+        print(f"Mock response mode set to: {'ON' if checked else 'OFF'}")
     
     def on_tray_activated(self, reason):
         """Handle tray icon clicks"""
@@ -138,6 +183,7 @@ class PromptAnywhereApp:
             self.shell_window.follow_up_submitted.connect(self.process_prompt)
             self.shell_window.feature_triggered.connect(self.handle_feature)
             self.shell_window.session_closed.connect(self.on_result_window_closed)
+            self.shell_window.history_session_selected.connect(self.open_history_session)
 
         self.shell_window.show()
         self.shell_window.raise_()
@@ -163,8 +209,11 @@ class PromptAnywhereApp:
         print(f"Feature result: {result}")
 
         # Handle special cases
-        if result == "maximize_window" and self.result_window:
-            self.result_window.showMaximized()
+        if result == "maximize_window" and self.shell_window:
+            self.shell_window.open_drawer(animated=True)
+            self.shell_window.show()
+            self.shell_window.raise_()
+            self.shell_window.activateWindow()
         elif result == "open_customize":
             print("Opening customize dialog (not implemented yet)")
 
@@ -180,17 +229,20 @@ class PromptAnywhereApp:
 
         chat = self.shell_window.result_widget
         chat.ensure_session()
+        self.shell_window.show_chat_mode()
 
         history_prompt = chat.build_prompt_with_history(prompt)
         chat.add_user_message(prompt)
         chat.start_assistant_message()
         self.shell_window.open_drawer(animated=True)
 
-        # Get agent from core app
-        agent = self.core_app.get_agent()
+        if self.mock_response_mode:
+            self.worker = MockAgentWorker(prompt, image_bytes)
+        else:
+            # Get agent from core app
+            agent = self.core_app.get_agent()
+            self.worker = AgentWorker(agent, history_prompt, image_bytes)
 
-        # Start agent worker
-        self.worker = AgentWorker(agent, history_prompt, image_bytes)
         chat = self.shell_window.result_widget
         self.worker.signals.text_chunk.connect(chat.append_text)
         self.worker.signals.finished.connect(chat.set_finished)
@@ -198,15 +250,16 @@ class PromptAnywhereApp:
         self.worker.start()
 
     def show_history_window(self):
-        """Open the history window."""
-        if not self.history_window:
-            self.history_window = HistoryWindow()
-            self.history_window.session_selected.connect(self.open_history_session)
-        if self.shell_window:
-            chat = self.shell_window.result_widget
-            chat.load_sessions()
-            self.history_window.set_sessions(chat.saved_sessions)
-        self.history_window.show()
+        """Open history inside the shell drawer."""
+        if not self.shell_window:
+            self.show_prompt_window()
+        chat = self.shell_window.result_widget
+        chat.load_sessions()
+        self.shell_window.set_history_sessions(chat.saved_sessions)
+        self.shell_window.show_history_mode(animated=True)
+        self.shell_window.show()
+        self.shell_window.raise_()
+        self.shell_window.activateWindow()
 
     def open_history_session(self, session_id: str):
         """Open a saved session in the result window."""
@@ -214,14 +267,16 @@ class PromptAnywhereApp:
             self.show_prompt_window()
         chat = self.shell_window.result_widget
         chat.load_session(session_id)
+        self.shell_window.show_chat_mode()
         self.shell_window.open_drawer(animated=False)
         self.shell_window.show()
 
     def on_result_window_closed(self):
         """Refresh history window after session close."""
-        if self.history_window and self.result_window:
-            self.result_window.load_sessions()
-            self.history_window.set_sessions(self.result_window.saved_sessions)
+        if self.shell_window:
+            chat = self.shell_window.result_widget
+            chat.load_sessions()
+            self.shell_window.set_history_sessions(chat.saved_sessions)
     
     def run(self):
         """Start application loop"""
