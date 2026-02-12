@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QEasingCurve, QEvent, Qt, Signal, QSize, QVariantAnimation
-from PySide6.QtGui import QPixmap, QIcon
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -30,15 +30,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from prompt_anywhere.ui.common import (
+    FixedBackgroundLabel,
+    apply_rounded_mask,
+    get_asset_path,
+    set_button_icon,
+    update_background_pixmap as common_update_background_pixmap,
+)
 from prompt_anywhere.ui.windows.main_prompt_window import MainPromptWindow
 from prompt_anywhere.ui.windows.result_window import ResultWindow
-
-
-class FixedBackgroundLabel(QLabel):
-    """Background label that does not affect layout sizing."""
-
-    def sizeHint(self):
-        return QSize(0, 0)
 
 
 class PromptShellWindow(QWidget):
@@ -69,9 +69,21 @@ class PromptShellWindow(QWidget):
         self._ui_debug_enabled = self._is_debug_enabled()
         self._last_anim_debug_ts = 0.0
 
-        root_layout = QVBoxLayout()
-        root_layout.setContentsMargins(0, 0, 0, 0)
-        root_layout.setSpacing(0)
+        self.setup_ui()
+
+    def setup_ui(self):
+        """Create UI elements."""
+        self._build_container()
+        self._build_header()
+        self._build_main_content()
+        self._wire_signals()
+        self._apply_initial_state()
+
+    def _build_container(self):
+        """Create root layout, container, background, and content widget skeleton."""
+        self._root_layout = QVBoxLayout()
+        self._root_layout.setContentsMargins(0, 0, 0, 0)
+        self._root_layout.setSpacing(0)
 
         self.container = QWidget()
         self.container.setStyleSheet(
@@ -100,10 +112,12 @@ class PromptShellWindow(QWidget):
             """
         )
 
-        content_layout = QVBoxLayout()
-        content_layout.setContentsMargins(5, 5, 5, 5)
-        content_layout.setSpacing(4)
+        self._content_layout = QVBoxLayout()
+        self._content_layout.setContentsMargins(5, 5, 5, 5)
+        self._content_layout.setSpacing(4)
 
+    def _build_header(self):
+        """Build shell header row with title and close button."""
         header_layout = QHBoxLayout()
         header_layout.setContentsMargins(0, 0, 0, 0)
         header_layout.setSpacing(0)
@@ -142,12 +156,13 @@ class PromptShellWindow(QWidget):
             }
             """
         )
-        self.set_button_icon(self.close_btn, "close_24dp_E3E3E3_FILL0_wght400_GRAD0_opsz24.svg", 12)
-        self.close_btn.clicked.connect(self.hide)
+        set_button_icon(self.close_btn, "close_24dp_E3E3E3_FILL0_wght400_GRAD0_opsz24.svg", 12)
         header_layout.addWidget(self.close_btn)
 
-        content_layout.addLayout(header_layout)
+        self._content_layout.addLayout(header_layout)
 
+    def _build_main_content(self):
+        """Build drawer and prompt panel, assemble layout."""
         self.drawer_frame = QFrame()
         self.drawer_frame.setObjectName("chatDrawer")
         self.drawer_frame.setStyleSheet("QFrame#chatDrawer { background: transparent; border: none; }")
@@ -178,10 +193,10 @@ class PromptShellWindow(QWidget):
         self.drawer_frame.setObjectName("drawerFrame")
         self.drawer_stack.setObjectName("drawerStack")
 
-        content_layout.addWidget(self.drawer_frame)
-        content_layout.addWidget(self.prompt_widget)
+        self._content_layout.addWidget(self.drawer_frame)
+        self._content_layout.addWidget(self.prompt_widget)
 
-        self.content_widget.setLayout(content_layout)
+        self.content_widget.setLayout(self._content_layout)
 
         container_stack = QStackedLayout()
         container_stack.setContentsMargins(0, 0, 0, 0)
@@ -190,14 +205,19 @@ class PromptShellWindow(QWidget):
         container_stack.addWidget(self.content_widget)
         self.container.setLayout(container_stack)
 
-        root_layout.addWidget(self.container)
-        self.setLayout(root_layout)
+        self._root_layout.addWidget(self.container)
+        self.setLayout(self._root_layout)
 
+    def _wire_signals(self):
+        """Connect widget signals to slots."""
+        self.close_btn.clicked.connect(self.hide)
         self.prompt_widget.prompt_submitted.connect(self._on_prompt_submitted)
         self.prompt_widget.feature_triggered.connect(self.feature_triggered)
         self.result_widget.follow_up_submitted.connect(self.follow_up_submitted)
         self.result_widget.session_closed.connect(self.session_closed)
 
+    def _apply_initial_state(self):
+        """Set size, mask, background, and debug state."""
         self.setMinimumWidth(self.prompt_widget.window_width)
         self.resize(self.prompt_widget.window_width, self.prompt_widget.window_height + 24)
         self.adjustSize()
@@ -277,40 +297,15 @@ class PromptShellWindow(QWidget):
                 )
         return super().eventFilter(watched, event)
 
-    def get_asset_path(self, filename: str) -> str:
-        """Return the full path to an asset file."""
-        return str(Path(__file__).resolve().parents[1] / "assets" / filename)
-
     def get_background_path(self) -> str:
         """Return the background image path."""
-        return self.get_asset_path("background.png")
-
-    def set_button_icon(self, button: QPushButton, filename: str, size: int):
-        """Apply an icon from assets to a button."""
-        path = self.get_asset_path(filename)
-        icon = QIcon(path)
-        if icon.isNull():
-            return
-        button.setIcon(icon)
-        button.setIconSize(QSize(size, size))
+        return get_asset_path("background.png")
 
     def update_background_pixmap(self) -> None:
         """Scale and apply the background image to the shell container."""
-        if self.background_pixmap.isNull():
-            return
-        target_size = self.container.size()
-        source = self.background_pixmap
-        if source.width() < target_size.width() or source.height() < target_size.height():
-            source = source.scaled(
-                target_size,
-                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-        x = max(0, (source.width() - target_size.width()) // 2)
-        y = max(0, (source.height() - target_size.height()) // 2)
-        cropped = source.copy(x, y, target_size.width(), target_size.height())
-        self.background_label.setPixmap(cropped)
-        self.background_label.resize(target_size)
+        common_update_background_pixmap(
+            self.background_label, self.background_pixmap, self.container.size()
+        )
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -319,14 +314,7 @@ class PromptShellWindow(QWidget):
 
     def update_window_mask(self) -> None:
         """Clip shell to rounded corners so background image doesn't bleed at edges."""
-        from PySide6.QtGui import QPainterPath, QRegion
-
-        radius = 16
-        rect = self.rect()
-        path = QPainterPath()
-        path.addRoundedRect(rect, radius, radius)
-        region = QRegion(path.toFillPolygon().toPolygon())
-        self.setMask(region)
+        apply_rounded_mask(self, radius=16)
 
     def _on_prompt_submitted(self, prompt: str, image_bytes: object) -> None:
         self.open_drawer(animated=True)

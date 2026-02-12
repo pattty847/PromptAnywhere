@@ -54,13 +54,24 @@ Concise overview of project structure and class roles. See [AGENTS.md](../AGENTS
 - **AgentWorker** — Thread: calls `agent.send_prompt()`, emits chunks via StreamSignals.
 - **HotkeySignals** — `triggered`; used to invoke show_prompt from hotkey thread.
 
+### Common (`ui/common/`)
+Shared UI utilities used by the main windows (no duplicated asset/background/mask logic).
+- **assets** — `get_asset_path(filename)`, `set_button_icon(button, filename, size)`, `load_icon_pixmap()`, `get_icon_name(icon_key)`; optional `ICON_MAP`.
+- **background** — `FixedBackgroundLabel` (zero sizeHint), `update_background_pixmap(label, pixmap, target_size)` for scaled/cropped background.
+- **window_shape** — `apply_rounded_mask(widget, radius=16)` for frameless rounded corners.
+
+### Services (`ui/services/`)
+UI-facing services; isolates I/O from widgets.
+- **session_manager** — `get_history_path()`, `load_sessions(path)`, `save_session(path, session_payload)`, `load_session_by_id(path, session_id)`. Used by **ResultWindow** for chat history persistence (`~/.prompt_anywhere/chat_sessions.json`).
+
 ### Windows (`ui/windows/`)
-- **PromptShellWindow** — Single top-level window: prompt bar (bottom) + collapsible chat drawer (top). Embeds `MainPromptWindow` and `ResultWindow`; owns drawer open/close animation. Emits `prompt_submitted`, `follow_up_submitted`, `feature_triggered`, `session_closed`.
+Main windows use `setup_ui()` split into: `_build_container()`, `_build_header()`, `_build_main_content()`, `_wire_signals()`, `_apply_initial_state()`. They rely on `ui/common` for assets, background, and rounded mask.
+- **PromptShellWindow** — Single top-level window: prompt bar (bottom) + collapsible chat drawer (top). Embeds `MainPromptWindow` and `ResultWindow`; owns drawer open/close animation. Emits `prompt_submitted`, `follow_up_submitted`, `feature_triggered`, `session_closed`, `history_session_selected`.
 - **MainPromptWindow** — Prompt bar: input, feature buttons, screenshot. Embeddable (`embedded=True`). Emits `prompt_submitted`, `feature_triggered`.
-- **ResultWindow** — Chat/streaming area; session list and persistence. Embeddable. Emits `follow_up_submitted`, `session_closed`.
+- **ResultWindow** — Chat/streaming area; renders messages and handles interaction; session load/save/find delegated to **session_manager**. Embeddable. Emits `follow_up_submitted`, `session_closed`.
 - **PromptInputWindow** — Legacy minimal prompt input (if used).
 - **HistoryWindow** — List/load saved sessions; emits `session_selected`.
-- **ScreenshotOverlay** — Full-screen overlay for screenshot capture.
+- **ScreenshotOverlay** — Full-screen overlay for screenshot capture (PIL/Pillow).
 
 ### Widgets (`ui/widgets/`)
 - **FeatureCard** — Button for a feature (icon + label).

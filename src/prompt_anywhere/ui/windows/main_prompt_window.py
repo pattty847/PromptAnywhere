@@ -7,15 +7,17 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, Signal, Slot, QSize
 from PySide6.QtGui import QCursor, QPixmap, QIcon
+from prompt_anywhere.ui.common import (
+    FixedBackgroundLabel,
+    apply_rounded_mask,
+    get_asset_path,
+    get_icon_name,
+    set_button_icon,
+    update_background_pixmap as common_update_background_pixmap,
+)
 from prompt_anywhere.ui.windows.screenshot_overlay import ScreenshotOverlay
 from prompt_anywhere.core.utils.platform_utils import apply_blur_effect
-
-
-class FixedBackgroundLabel(QLabel):
-    """Background label that does not affect layout sizing."""
-
-    def sizeHint(self):
-        return QSize(0, 0)
+from prompt_anywhere.ui.common.assets import load_icon_pixmap
 
 
 class MainPromptWindow(QWidget):
@@ -78,13 +80,20 @@ class MainPromptWindow(QWidget):
 
     def setup_ui(self):
         """Create UI elements matching prototype"""
-        layout = QVBoxLayout()
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
+        self._build_container()
+        self._build_header()
+        self._build_main_content()
+        self._wire_signals()
+        self._apply_initial_state()
+
+    def _build_container(self):
+        """Create root layout, container, background, and content widget skeleton."""
+        self._root_layout = QVBoxLayout()
+        self._root_layout.setContentsMargins(0, 0, 0, 0)
+        self._root_layout.setSpacing(0)
+        self._root_layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
 
         if self._show_chrome:
-            # Main container
             self.container = QWidget()
             self.container.setStyleSheet("""
                 QWidget {
@@ -113,35 +122,32 @@ class MainPromptWindow(QWidget):
             self.content_widget = QWidget()
             self.content_widget.setStyleSheet("QWidget { background: transparent; border: none; }")
 
-        container_layout = QVBoxLayout()
-        if self._show_chrome:
-            container_layout.setContentsMargins(4, 4, 4, 4)
-        else:
-            # Embedded in shell: keep content close to shell edges.
-            container_layout.setContentsMargins(4, 4, 4, 4)
-        container_layout.setSpacing(4)
+        self._container_layout = QVBoxLayout()
+        self._container_layout.setContentsMargins(4, 4, 4, 4)
+        self._container_layout.setSpacing(4)
 
-        # Header row with title and close button (top-level chrome mode).
-        if self._show_chrome:
-            header_layout = QHBoxLayout()
-            header_layout.setContentsMargins(0, 0, 0, 0)
-            header_layout.setSpacing(0)
+    def _build_header(self):
+        """Build header row with title and close button (chrome mode only)."""
+        if not self._show_chrome:
+            return
+        header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(0)
 
-            self.title_label = QLabel("Prompt Anywhere")
-            self.title_label.setStyleSheet(self.title_label_stylesheet())
-            header_layout.addWidget(self.title_label)
-            header_layout.addStretch()
+        self.title_label = QLabel("Prompt Anywhere")
+        self.title_label.setStyleSheet(self.title_label_stylesheet())
+        header_layout.addWidget(self.title_label)
+        header_layout.addStretch()
 
-            # Close button
-            self.close_btn = QPushButton("X")
-            self.close_btn.setFixedSize(20, 20)
-            self.close_btn.setStyleSheet(self.close_button_stylesheet())
-            self.close_btn.clicked.connect(self.close)
-            header_layout.addWidget(self.close_btn)
+        self.close_btn = QPushButton("X")
+        self.close_btn.setFixedSize(20, 20)
+        self.close_btn.setStyleSheet(self.close_button_stylesheet())
+        header_layout.addWidget(self.close_btn)
 
-            container_layout.addLayout(header_layout)
+        self._container_layout.addLayout(header_layout)
 
-        # Input row with utility buttons
+    def _build_main_content(self):
+        """Build input row, utility buttons, feature grid, and bottom row."""
         input_row_layout = QHBoxLayout()
         input_row_layout.setContentsMargins(0, 0, 0, 0)
         input_row_layout.setSpacing(6)
@@ -151,26 +157,21 @@ class MainPromptWindow(QWidget):
         self.input_field.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.input_field.setFixedHeight(32)
         self.input_field.setStyleSheet(self.input_stylesheet())
-        self.input_field.returnPressed.connect(self.submit_prompt)
         input_row_layout.addWidget(self.input_field)
 
-        # Send button inline with input
         self.send_btn = QPushButton("Send")
         self.send_btn.setFixedSize(68, 32)
         self.send_btn.setStyleSheet(self.send_button_stylesheet())
-        self.send_btn.clicked.connect(self.submit_prompt)
         input_row_layout.addWidget(self.send_btn)
 
-        container_layout.addLayout(input_row_layout)
+        self._container_layout.addLayout(input_row_layout)
 
-        # Utility buttons row (compact, below input)
         utility_buttons_layout = QHBoxLayout()
         utility_buttons_layout.setContentsMargins(0, 0, 0, 0)
         utility_buttons_layout.setSpacing(4)
         utility_buttons_layout.addStretch()
 
         self.screenshot_btn = self.create_utility_button("Screenshot", "screenshot")
-        self.screenshot_btn.clicked.connect(self.capture_screenshot)
         utility_buttons_layout.addWidget(self.screenshot_btn)
 
         history_btn = self.create_utility_button("History", "history")
@@ -184,15 +185,13 @@ class MainPromptWindow(QWidget):
         settings_btn.clicked.connect(lambda: self.trigger_feature("customize"))
         utility_buttons_layout.addWidget(settings_btn)
 
-        container_layout.addLayout(utility_buttons_layout)
+        self._container_layout.addLayout(utility_buttons_layout)
 
-        # Feature buttons grid
         features_grid = QGridLayout()
         features_grid.setContentsMargins(0, 0, 0, 0)
         features_grid.setHorizontalSpacing(4)
         features_grid.setVerticalSpacing(4)
 
-        # Row 1
         google_btn = self.create_feature_button("Google Search", "Ctrl + G", "google")
         google_btn.clicked.connect(lambda: self.trigger_feature("google_search"))
         features_grid.addWidget(google_btn, 0, 0)
@@ -226,9 +225,8 @@ class MainPromptWindow(QWidget):
         feature_container_layout.setSpacing(0)
         feature_container_layout.addLayout(features_grid)
         feature_container.setLayout(feature_container_layout)
-        container_layout.addWidget(feature_container)
+        self._container_layout.addWidget(feature_container)
 
-        # Tip and Customize row
         bottom_layout = QHBoxLayout()
         bottom_layout.setContentsMargins(0, 0, 0, 0)
         bottom_layout.setSpacing(4)
@@ -257,9 +255,9 @@ class MainPromptWindow(QWidget):
         self.customize_btn.clicked.connect(lambda: self.trigger_feature("customize"))
         bottom_layout.addWidget(self.customize_btn)
 
-        container_layout.addLayout(bottom_layout)
+        self._container_layout.addLayout(bottom_layout)
 
-        self.content_widget.setLayout(container_layout)
+        self.content_widget.setLayout(self._container_layout)
 
         if self._show_chrome:
             container_stack = QStackedLayout()
@@ -268,16 +266,25 @@ class MainPromptWindow(QWidget):
             container_stack.addWidget(self.background_label)
             container_stack.addWidget(self.content_widget)
             self.container.setLayout(container_stack)
-            layout.addWidget(self.container)
+            self._root_layout.addWidget(self.container)
         else:
-            layout.addWidget(self.content_widget)
-        self.setLayout(layout)
+            self._root_layout.addWidget(self.content_widget)
+        self.setLayout(self._root_layout)
+
+    def _wire_signals(self):
+        """Connect widget signals to slots."""
+        self.input_field.returnPressed.connect(self.submit_prompt)
+        self.send_btn.clicked.connect(self.submit_prompt)
+        self.screenshot_btn.clicked.connect(self.capture_screenshot)
+        if self._show_chrome:
+            self.close_btn.clicked.connect(self.close)
+
+    def _apply_initial_state(self):
+        """Apply font scale, resize, background, and focus."""
         self.apply_font_scale()
         self.resize_to_contents()
         if self._show_chrome:
             self.update_background_pixmap()
-
-        # Focus input field
         self.input_field.setFocus()
 
     def create_utility_button(self, text: str, icon: str) -> QPushButton:
@@ -286,9 +293,9 @@ class MainPromptWindow(QWidget):
         btn.setFixedHeight(16)
         btn.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         btn.setStyleSheet(self.utility_button_stylesheet())
-        icon_name = self.get_icon_name(icon)
+        icon_name = get_icon_name(icon)
         if icon_name:
-            self.set_button_icon(btn, icon_name, self.scaled_icon_size(12))
+            set_button_icon(btn, icon_name, self.scaled_icon_size(12))
             self.utility_button_icons.append((btn, icon_name))
         self.utility_buttons.append(btn)
         return btn
@@ -309,9 +316,9 @@ class MainPromptWindow(QWidget):
 
         icon_label = QLabel()
         icon_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        icon_name = self.get_icon_name(icon)
+        icon_name = get_icon_name(icon)
         if icon_name:
-            icon_label.setPixmap(self.load_icon_pixmap(icon_name, self.scaled_icon_size(14)))
+            icon_label.setPixmap(load_icon_pixmap(icon_name, self.scaled_icon_size(14)))
             self.feature_icon_labels.append((icon_label, icon_name))
         top_row = QHBoxLayout()
         top_row.setContentsMargins(0, 0, 0, 0)
@@ -369,27 +376,15 @@ class MainPromptWindow(QWidget):
 
     def get_background_path(self) -> str:
         """Return the background image path."""
-        return str(Path(__file__).resolve().parents[1] / "assets" / "background.png")
+        return get_asset_path("background.png")
 
     def update_background_pixmap(self):
         """Scale and apply the background image to the container."""
         if not self._show_chrome:
             return
-        if self.background_pixmap.isNull():
-            return
-        target_size = self.container.size()
-        source = self.background_pixmap
-        if source.width() < target_size.width() or source.height() < target_size.height():
-            source = source.scaled(
-                target_size,
-                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                Qt.TransformationMode.SmoothTransformation
-            )
-        x = max(0, (source.width() - target_size.width()) // 2)
-        y = max(0, (source.height() - target_size.height()) // 2)
-        cropped = source.copy(x, y, target_size.width(), target_size.height())
-        self.background_label.setPixmap(cropped)
-        self.background_label.resize(target_size)
+        common_update_background_pixmap(
+            self.background_label, self.background_pixmap, self.container.size()
+        )
 
     def scaled_pt(self, base_size: int) -> int:
         """Return scaled font size in points."""
@@ -403,43 +398,9 @@ class MainPromptWindow(QWidget):
         """Return scaled icon size."""
         return max(10, base_size + (self.font_scale * 2))
 
-    def get_asset_path(self, filename: str) -> str:
-        """Return the full path to an asset file."""
-        return str(Path(__file__).resolve().parents[1] / "assets" / filename)
-
     def load_icon_pixmap(self, filename: str, size: int) -> QPixmap:
         """Load an icon pixmap from assets."""
-        path = self.get_asset_path(filename)
-        icon = QIcon(path)
-        if icon.isNull():
-            return QPixmap()
-        return icon.pixmap(size, size)
-
-    def set_button_icon(self, button: QPushButton, filename: str, size: int):
-        """Apply an icon from assets to a button."""
-        path = self.get_asset_path(filename)
-        icon = QIcon(path)
-        if icon.isNull():
-            return
-        button.setIcon(icon)
-        button.setIconSize(QSize(size, size))
-
-    def get_icon_name(self, icon_key: str) -> str:
-        """Map logical icon keys to asset filenames."""
-        icon_map = {
-            "screenshot": "image_24dp_E3E3E3_FILL0_wght400_GRAD0_opsz24.svg",
-            "history": "history_24dp_E3E3E3_FILL0_wght400_GRAD0_opsz24.svg",
-            "grid": "widget_small_24dp_E3E3E3_FILL0_wght400_GRAD0_opsz24.svg",
-            "settings": "menu_24dp_E3E3E3_FILL0_wght400_GRAD0_opsz24.svg",
-            "google": "google.svg",
-            "files": "search_24dp_E3E3E3_FILL0_wght400_GRAD0_opsz24.svg",
-            "browser": "browse_gallery_24dp_E3E3E3_FILL0_wght400_GRAD0_opsz24.svg",
-            "terminal": "prompt_suggestion_24dp_E3E3E3_FILL0_wght400_GRAD0_opsz24.svg",
-            "maximize": "toggle_on_24dp_E3E3E3_FILL0_wght400_GRAD0_opsz24.svg",
-            "send": "send_24dp_E3E3E3_FILL0_wght400_GRAD0_opsz24.svg",
-            "close": "close_24dp_E3E3E3_FILL0_wght400_GRAD0_opsz24.svg",
-        }
-        return icon_map.get(icon_key, "")
+        return load_icon_pixmap(filename, size)
 
     def title_label_stylesheet(self) -> str:
         return f"""
@@ -603,7 +564,7 @@ class MainPromptWindow(QWidget):
             self.title_label.setStyleSheet(self.title_label_stylesheet())
             self.close_btn.setStyleSheet(self.close_button_stylesheet())
             self.close_btn.setFixedSize(self.scaled_height(20), self.scaled_height(20))
-            self.set_button_icon(self.close_btn, self.get_icon_name("close"), self.scaled_icon_size(12))
+            set_button_icon(self.close_btn, get_icon_name("close"), self.scaled_icon_size(12))
             self.close_btn.setText("")
 
         self.input_field.setStyleSheet(self.input_stylesheet())
@@ -611,14 +572,14 @@ class MainPromptWindow(QWidget):
 
         self.send_btn.setStyleSheet(self.send_button_stylesheet())
         self.send_btn.setFixedHeight(self.scaled_height(32))
-        self.set_button_icon(self.send_btn, self.get_icon_name("send"), self.scaled_icon_size(12))
+        set_button_icon(self.send_btn, get_icon_name("send"), self.scaled_icon_size(12))
 
         for btn in self.utility_buttons:
             btn.setStyleSheet(self.utility_button_stylesheet())
             btn.setFixedHeight(self.scaled_height(16))
 
         for btn, icon_name in self.utility_button_icons:
-            self.set_button_icon(btn, icon_name, self.scaled_icon_size(12))
+            set_button_icon(btn, icon_name, self.scaled_icon_size(12))
 
         for btn in self.feature_buttons:
             btn.setFixedHeight(self.scaled_height(46))
@@ -630,7 +591,7 @@ class MainPromptWindow(QWidget):
             label.setStyleSheet(self.feature_hotkey_stylesheet())
 
         for label, icon_name in self.feature_icon_labels:
-            label.setPixmap(self.load_icon_pixmap(icon_name, self.scaled_icon_size(14)))
+            label.setPixmap(load_icon_pixmap(icon_name, self.scaled_icon_size(14)))
 
         self.tip_label.setStyleSheet(self.tip_label_stylesheet())
         self.customize_btn.setStyleSheet(self.customize_button_stylesheet())
@@ -667,13 +628,7 @@ class MainPromptWindow(QWidget):
         """Apply rounded corner mask to remove square edges."""
         if not self._show_chrome:
             return
-        from PySide6.QtGui import QPainterPath, QRegion
-        radius = 16
-        rect = self.rect()
-        path = QPainterPath()
-        path.addRoundedRect(rect, radius, radius)
-        region = QRegion(path.toFillPolygon().toPolygon())
-        self.setMask(region)
+        apply_rounded_mask(self, radius=16)
 
     def capture_screenshot(self):
         """Open screenshot overlay"""

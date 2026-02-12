@@ -1,11 +1,10 @@
 """Result window with streaming response."""
-import json
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
-from PySide6.QtCore import Qt, Signal, Slot, QSize
-from PySide6.QtGui import QCursor, QPixmap, QIcon
+from PySide6.QtCore import Qt, Signal, Slot
+from PySide6.QtGui import QCursor, QPixmap
 from PySide6.QtWidgets import (
     QLabel,
     QHBoxLayout,
@@ -18,16 +17,19 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from prompt_anywhere.ui.common import (
+    FixedBackgroundLabel,
+    get_asset_path,
+    set_button_icon,
+    update_background_pixmap as common_update_background_pixmap,
+)
+from prompt_anywhere.ui.services.session_manager import (
+    get_history_path as get_session_history_path,
+    load_session_by_id,
+    load_sessions as load_sessions_from_disk,
+    save_session as save_session_to_disk,
+)
 from prompt_anywhere.ui.windows.screenshot_overlay import ScreenshotOverlay
-
-
-class FixedBackgroundLabel(QLabel):
-    """Background label that does not affect layout sizing."""
-
-    def sizeHint(self):
-        return QSize(0, 0)
-
-
 from prompt_anywhere.ui.windows.result_window_actions import copy_to_clipboard, update_code_block_bar
 
 
@@ -70,7 +72,7 @@ class ResultWindow(QWidget):
         self.session_conversation = []
         self.saved_sessions = []
         self.active_assistant_index = None
-        self.history_path = self.get_history_path()
+        self.history_path = get_session_history_path()
 
         if not self._embedded:
             cursor_pos = QCursor.pos()
@@ -81,14 +83,19 @@ class ResultWindow(QWidget):
         self.drag_position = None
 
         self.setup_ui()
-        self.load_sessions()
-        if not self._embedded and self._show_chrome:
-            self.update_background_pixmap()
 
     def setup_ui(self):
         """Create UI elements."""
-        root_layout = QVBoxLayout()
-        root_layout.setContentsMargins(0, 0, 0, 0)
+        self._build_container()
+        self._build_header()
+        self._build_main_content()
+        self._wire_signals()
+        self._apply_initial_state()
+
+    def _build_container(self):
+        """Create root layout, container, background, and content widget skeleton."""
+        self._root_layout = QVBoxLayout()
+        self._root_layout.setContentsMargins(0, 0, 0, 0)
 
         if self._show_chrome:
             self.container = QWidget()
@@ -123,13 +130,12 @@ class ResultWindow(QWidget):
             self.content_widget = QWidget()
             self.content_widget.setStyleSheet("QWidget { background: transparent; border: none; }")
 
-        container_layout = QVBoxLayout()
+        self._container_layout = QVBoxLayout()
         if self._show_chrome:
-            container_layout.setContentsMargins(12, 10, 12, 10)
+            self._container_layout.setContentsMargins(12, 10, 12, 10)
         else:
-            # Embedded drawer mode should sit close to shell edges.
-            container_layout.setContentsMargins(5, 5, 5, 5)
-        container_layout.setSpacing(6)
+            self._container_layout.setContentsMargins(5, 5, 5, 5)
+        self._container_layout.setSpacing(6)
 
         self.loading_label = QLabel("Loading...")
         self.loading_label.setStyleSheet(
@@ -146,49 +152,52 @@ class ResultWindow(QWidget):
         )
         self.loading_label.setVisible(False)
 
-        if self._show_chrome:
-            title_layout = QHBoxLayout()
-            title = QLabel("Gemini Response")
-            title.setStyleSheet(
-                """
-                QLabel {
-                    color: #FF9D5C;
-                    font-family: 'Segoe UI', sans-serif;
-                    font-size: 13pt;
-                    font-weight: bold;
-                    background: transparent;
-                    border: none;
-                    padding: 0px;
-                }
-                """
-            )
-            title_layout.addWidget(title)
-            title_layout.addWidget(self.loading_label)
-            title_layout.addStretch()
+    def _build_header(self):
+        """Build title row with close button (chrome mode only)."""
+        if not self._show_chrome:
+            return
+        title_layout = QHBoxLayout()
+        title = QLabel("Gemini Response")
+        title.setStyleSheet(
+            """
+            QLabel {
+                color: #FF9D5C;
+                font-family: 'Segoe UI', sans-serif;
+                font-size: 13pt;
+                font-weight: bold;
+                background: transparent;
+                border: none;
+                padding: 0px;
+            }
+            """
+        )
+        title_layout.addWidget(title)
+        title_layout.addWidget(self.loading_label)
+        title_layout.addStretch()
 
-            close_btn = QPushButton("X")
-            close_btn.setFixedSize(20, 20)
-            close_btn.setStyleSheet(
-                """
-                QPushButton {
-                    background-color: transparent;
-                    color: rgba(255, 255, 255, 0.6);
-                    border: none;
-                    font-size: 12pt;
-                    font-weight: bold;
-                    padding: 0px;
-                }
-                QPushButton:hover {
-                    color: rgba(255, 255, 255, 1.0);
-                }
-                """
-            )
-            close_btn.clicked.connect(self.close)
-            self.set_button_icon(close_btn, "close_24dp_E3E3E3_FILL0_wght400_GRAD0_opsz24.svg", 12)
-            title_layout.addWidget(close_btn)
-            container_layout.addLayout(title_layout)
+        self.close_btn = QPushButton("X")
+        self.close_btn.setFixedSize(20, 20)
+        self.close_btn.setStyleSheet(
+            """
+            QPushButton {
+                background-color: transparent;
+                color: rgba(255, 255, 255, 0.6);
+                border: none;
+                font-size: 12pt;
+                font-weight: bold;
+                padding: 0px;
+            }
+            QPushButton:hover {
+                color: rgba(255, 255, 255, 1.0);
+            }
+            """
+        )
+        set_button_icon(self.close_btn, "close_24dp_E3E3E3_FILL0_wght400_GRAD0_opsz24.svg", 12)
+        title_layout.addWidget(self.close_btn)
+        self._container_layout.addLayout(title_layout)
 
-        # Action row (minimal): copy last answer + stop streaming (wired later)
+    def _build_main_content(self):
+        """Build action row, text display, code blocks bar, and optional follow-up input."""
         action_row = QHBoxLayout()
         action_row.setContentsMargins(0, 0, 0, 0)
         action_row.setSpacing(6)
@@ -212,12 +221,11 @@ class ResultWindow(QWidget):
             }
             """
         )
-        self.copy_last_btn.clicked.connect(self.copy_last_assistant_message)
 
         self.stop_btn = QPushButton("Stop")
         self.stop_btn.setFixedHeight(22)
         self.stop_btn.setToolTip("Stop streaming")
-        self.stop_btn.setEnabled(False)  # enabled when streaming starts
+        self.stop_btn.setEnabled(False)
         self.stop_btn.setStyleSheet(
             """
             QPushButton {
@@ -242,7 +250,7 @@ class ResultWindow(QWidget):
         action_row.addStretch(1)
         action_row.addWidget(self.copy_last_btn)
         action_row.addWidget(self.stop_btn)
-        container_layout.addLayout(action_row)
+        self._container_layout.addLayout(action_row)
 
         self.text_display = QTextEdit()
         self.text_display.setReadOnly(True)
@@ -264,16 +272,15 @@ class ResultWindow(QWidget):
             """
         )
         self.text_display.setPlainText("Loading...")
-        container_layout.addWidget(self.text_display, stretch=1)
+        self._container_layout.addWidget(self.text_display, stretch=1)
 
-        # Code block quick-copy buttons (only for latest assistant msg)
         self.code_blocks_bar = QWidget()
         self.code_blocks_bar.setVisible(False)
         self.code_blocks_layout = QHBoxLayout()
         self.code_blocks_layout.setContentsMargins(0, 0, 0, 0)
         self.code_blocks_layout.setSpacing(6)
         self.code_blocks_bar.setLayout(self.code_blocks_layout)
-        container_layout.addWidget(self.code_blocks_bar)
+        self._container_layout.addWidget(self.code_blocks_bar)
 
         self._last_code_blocks: list[str] = []
 
@@ -301,7 +308,6 @@ class ResultWindow(QWidget):
                 }
                 """
             )
-            self.followup_input.returnPressed.connect(self.submit_followup)
             followup_row.addWidget(self.followup_input)
 
             self.followup_screenshot_btn = QPushButton("")
@@ -320,12 +326,11 @@ class ResultWindow(QWidget):
                 }
                 """
             )
-            self.set_button_icon(
+            set_button_icon(
                 self.followup_screenshot_btn,
                 "image_24dp_E3E3E3_FILL0_wght400_GRAD0_opsz24.svg",
                 14,
             )
-            self.followup_screenshot_btn.clicked.connect(self.capture_followup_screenshot)
             followup_row.addWidget(self.followup_screenshot_btn)
 
             self.followup_send_btn = QPushButton("Send")
@@ -349,12 +354,11 @@ class ResultWindow(QWidget):
                 }
                 """
             )
-            self.set_button_icon(self.followup_send_btn, "send_24dp_E3E3E3_FILL0_wght400_GRAD0_opsz24.svg", 14)
-            self.followup_send_btn.clicked.connect(self.submit_followup)
+            set_button_icon(self.followup_send_btn, "send_24dp_E3E3E3_FILL0_wght400_GRAD0_opsz24.svg", 14)
             followup_row.addWidget(self.followup_send_btn)
-            container_layout.addLayout(followup_row)
+            self._container_layout.addLayout(followup_row)
 
-        self.content_widget.setLayout(container_layout)
+        self.content_widget.setLayout(self._container_layout)
 
         if self._show_chrome:
             container_stack = QStackedLayout()
@@ -363,11 +367,26 @@ class ResultWindow(QWidget):
             container_stack.addWidget(self.background_label)
             container_stack.addWidget(self.content_widget)
             self.container.setLayout(container_stack)
-            root_layout.addWidget(self.container)
+            self._root_layout.addWidget(self.container)
         else:
-            root_layout.addWidget(self.content_widget)
+            self._root_layout.addWidget(self.content_widget)
+        self.setLayout(self._root_layout)
 
-        self.setLayout(root_layout)
+    def _wire_signals(self):
+        """Connect widget signals to slots."""
+        self.copy_last_btn.clicked.connect(self.copy_last_assistant_message)
+        if self._show_chrome:
+            self.close_btn.clicked.connect(self.close)
+        if self._show_followup_input:
+            self.followup_input.returnPressed.connect(self.submit_followup)
+            self.followup_screenshot_btn.clicked.connect(self.capture_followup_screenshot)
+            self.followup_send_btn.clicked.connect(self.submit_followup)
+
+    def _apply_initial_state(self):
+        """Load sessions, update background, clear placeholder text."""
+        self.load_sessions()
+        if not self._embedded and self._show_chrome:
+            self.update_background_pixmap()
         self.text_display.setText("")
 
     @Slot(str)
@@ -494,75 +513,26 @@ class ResultWindow(QWidget):
         lines.append("Assistant:")
         return "\n".join(lines)
 
-    def get_history_path(self) -> Path:
-        """Return path to the persistent chat sessions file."""
-        base_dir = Path.home() / ".prompt_anywhere"
-        base_dir.mkdir(parents=True, exist_ok=True)
-        return base_dir / "chat_sessions.json"
-
-    def get_asset_path(self, filename: str) -> str:
-        """Return the full path to an asset file."""
-        return str(Path(__file__).resolve().parents[1] / "assets" / filename)
-
     def get_background_path(self) -> str:
         """Return the background image path."""
-        return self.get_asset_path("background.png")
-
-    def set_button_icon(self, button: QPushButton, filename: str, size: int):
-        """Apply an icon from assets to a button."""
-        path = self.get_asset_path(filename)
-        icon = QIcon(path)
-        if icon.isNull():
-            return
-        button.setIcon(icon)
-        button.setIconSize(QSize(size, size))
+        return get_asset_path("background.png")
 
     def update_background_pixmap(self):
         """Scale and apply the background image to the container."""
         if not self._show_chrome:
             return
-        if self.background_pixmap.isNull():
-            return
-
-        target_size = self.container.size()
-        source = self.background_pixmap
-        if source.width() < target_size.width() or source.height() < target_size.height():
-            source = source.scaled(
-                target_size,
-                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-        x = max(0, (source.width() - target_size.width()) // 2)
-        y = max(0, (source.height() - target_size.height()) // 2)
-        cropped = source.copy(x, y, target_size.width(), target_size.height())
-        self.background_label.setPixmap(cropped)
-        self.background_label.resize(target_size)
+        common_update_background_pixmap(
+            self.background_label, self.background_pixmap, self.container.size()
+        )
 
     def load_sessions(self):
         """Load session history from disk for history view."""
-        if not self.history_path.exists():
-            return
-        try:
-            data = json.loads(self.history_path.read_text(encoding="utf-8"))
-            if isinstance(data, dict) and isinstance(data.get("sessions"), list):
-                self.saved_sessions = data.get("sessions", [])
-        except (json.JSONDecodeError, OSError):
-            return
+        self.saved_sessions = load_sessions_from_disk(self.history_path)
 
     def save_session(self):
         """Persist the current session to disk."""
         if not self.session_id:
             return
-
-        sessions = []
-        if self.history_path.exists():
-            try:
-                data = json.loads(self.history_path.read_text(encoding="utf-8"))
-                if isinstance(data, dict) and isinstance(data.get("sessions"), list):
-                    sessions = data.get("sessions", [])
-            except (json.JSONDecodeError, OSError):
-                sessions = []
-
         now = datetime.now().isoformat(timespec="seconds")
         session_payload = {
             "id": self.session_id,
@@ -570,24 +540,7 @@ class ResultWindow(QWidget):
             "updated_at": now,
             "messages": self.session_conversation,
         }
-
-        updated = False
-        for index, session in enumerate(sessions):
-            if session.get("id") == self.session_id:
-                sessions[index] = session_payload
-                updated = True
-                break
-
-        if not updated:
-            sessions.append(session_payload)
-
-        try:
-            self.history_path.write_text(
-                json.dumps({"sessions": sessions}, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-        except OSError:
-            return
+        save_session_to_disk(self.history_path, session_payload)
 
     def render_conversation(self, entries=None):
         """Render the selected conversation history in the display."""
@@ -639,13 +592,12 @@ class ResultWindow(QWidget):
     def load_session(self, session_id: str):
         """Load a saved session by ID into the window."""
         self.load_sessions()
-        for session in self.saved_sessions:
-            if session.get("id") == session_id:
-                self.session_id = session_id
-                self.session_created_at = session.get("created_at")
-                self.session_conversation = session.get("messages", [])
-                self.render_conversation(self.session_conversation)
-                return
+        session = load_session_by_id(self.history_path, session_id)
+        if session is not None:
+            self.session_id = session_id
+            self.session_created_at = session.get("created_at")
+            self.session_conversation = session.get("messages", [])
+            self.render_conversation(self.session_conversation)
 
     def clear_loading_placeholder(self):
         """Clear any loading placeholder text."""
