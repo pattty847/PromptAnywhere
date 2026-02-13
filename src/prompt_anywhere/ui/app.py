@@ -192,7 +192,7 @@ class PromptAnywhereApp:
             self.show_prompt_window()
     
     def show_prompt_window(self):
-        """Display PromptAnywhere shell window."""
+        """Display PromptAnywhere shell window near the mouse cursor."""
         if not self.shell_window:
             self.shell_window = PromptShellWindow()
             self.shell_window.prompt_submitted.connect(self.process_prompt)
@@ -206,11 +206,34 @@ class PromptAnywhereApp:
         self.shell_window.set_available_agents(self.core_app.list_supported_agents())
         self.shell_window.set_selected_agent(self.core_app.get_current_agent_name())
 
+        # Position near mouse cursor, clamped to screen edges
+        self._position_near_cursor(self.shell_window)
+
         self.shell_window.show()
         self.shell_window.raise_()
         self.shell_window.activateWindow()
         self.shell_window.focus_input()
         self.shell_window.set_streaming_state(False)
+
+    def _position_near_cursor(self, window: PromptShellWindow) -> None:
+        """Place the window centered on the cursor, clamped to screen bounds."""
+        cursor = QCursor.pos()
+        screen = window.screen()
+        if screen is None:
+            return
+        avail = screen.availableGeometry()
+        w, h = window.width(), window.height()
+
+        # Center on cursor
+        x = cursor.x() - w // 2
+        y = cursor.y() - h // 2
+
+        # Clamp to screen edges with a small margin
+        margin = 8
+        x = max(avail.left() + margin, min(x, avail.right() - w - margin))
+        y = max(avail.top() + margin, min(y, avail.bottom() - h - margin))
+
+        window.move(x, y)
     
     @Slot(str, str)
     def handle_feature(self, feature_name: str, prompt: str):
