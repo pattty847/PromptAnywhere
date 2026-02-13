@@ -50,6 +50,7 @@ class GeminiAgent(BaseAgent):
         try:
             # Save screenshot to temporary file if provided
             image_bytes = context.get('image_bytes') if context else None
+            cancel_event = context.get("cancel_event") if context else None
             if image_bytes:
                 with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
                     tmp.write(image_bytes)
@@ -87,6 +88,10 @@ class GeminiAgent(BaseAgent):
             
             # Stream output line by line
             for line in iter(process.stdout.readline, ''):
+                if cancel_event is not None and cancel_event.is_set():
+                    process.terminate()
+                    process.wait()
+                    return
                 if line:
                     yield line
             

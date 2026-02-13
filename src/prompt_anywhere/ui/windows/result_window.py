@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QStackedLayout,
-    QTextEdit,
+    QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
@@ -81,6 +81,8 @@ class ResultWindow(QWidget):
         self.screenshot_bytes = None
         self.screenshot_overlay = None
         self.drag_position = None
+        self._copy_action_start_pos: int | None = None
+        self._copy_action_end_pos: int | None = None
 
         self.setup_ui()
 
@@ -197,63 +199,11 @@ class ResultWindow(QWidget):
         self._container_layout.addLayout(title_layout)
 
     def _build_main_content(self):
-        """Build action row, text display, code blocks bar, and optional follow-up input."""
-        action_row = QHBoxLayout()
-        action_row.setContentsMargins(0, 0, 0, 0)
-        action_row.setSpacing(6)
-
-        self.copy_last_btn = QPushButton("Copy")
-        self.copy_last_btn.setFixedHeight(22)
-        self.copy_last_btn.setToolTip("Copy last assistant message")
-        self.copy_last_btn.setStyleSheet(
-            """
-            QPushButton {
-                background-color: rgba(50, 50, 50, 140);
-                color: rgba(255, 255, 255, 0.9);
-                border: 1px solid rgba(255, 255, 255, 0.15);
-                border-radius: 6px;
-                padding: 2px 10px;
-                font-family: 'Segoe UI', sans-serif;
-                font-size: 8.5pt;
-            }
-            QPushButton:hover {
-                background-color: rgba(70, 70, 70, 170);
-            }
-            """
-        )
-
-        self.stop_btn = QPushButton("Stop")
-        self.stop_btn.setFixedHeight(22)
-        self.stop_btn.setToolTip("Stop streaming")
-        self.stop_btn.setEnabled(False)
-        self.stop_btn.setStyleSheet(
-            """
-            QPushButton {
-                background-color: rgba(120, 40, 40, 120);
-                color: rgba(255, 255, 255, 0.9);
-                border: 1px solid rgba(255, 255, 255, 0.15);
-                border-radius: 6px;
-                padding: 2px 10px;
-                font-family: 'Segoe UI', sans-serif;
-                font-size: 8.5pt;
-            }
-            QPushButton:hover {
-                background-color: rgba(160, 60, 60, 150);
-            }
-            QPushButton:disabled {
-                background-color: rgba(60, 60, 60, 60);
-                color: rgba(255, 255, 255, 0.35);
-            }
-            """
-        )
-
-        action_row.addStretch(1)
-        action_row.addWidget(self.copy_last_btn)
-        action_row.addWidget(self.stop_btn)
-        self._container_layout.addLayout(action_row)
-
-        self.text_display = QTextEdit()
+        """Build text display, code blocks bar, and optional follow-up input."""
+        self.text_display = QTextBrowser()
         self.text_display.setReadOnly(True)
+        self.text_display.setOpenLinks(False)
+        self.text_display.setOpenExternalLinks(False)
         self.text_display.setStyleSheet(
             """
             QTextEdit {
@@ -374,7 +324,7 @@ class ResultWindow(QWidget):
 
     def _wire_signals(self):
         """Connect widget signals to slots."""
-        self.copy_last_btn.clicked.connect(self.copy_last_assistant_message)
+        self.text_display.anchorClicked.connect(self._on_text_anchor_clicked)
         if self._show_chrome:
             self.close_btn.clicked.connect(self.close)
         if self._show_followup_input:
@@ -388,6 +338,7 @@ class ResultWindow(QWidget):
         if not self._embedded and self._show_chrome:
             self.update_background_pixmap()
         self.text_display.setText("")
+        self._update_inline_copy_action()
 
     @Slot(str)
     def append_text(self, text):
@@ -395,6 +346,7 @@ class ResultWindow(QWidget):
 
         Autoscroll policy: only stick to bottom if the user is already at bottom.
         """
+        self._remove_inline_copy_action()
         self.clear_loading_placeholder()
 
         vbar = self.text_display.verticalScrollBar()
@@ -411,6 +363,7 @@ class ResultWindow(QWidget):
         if self.active_assistant_index is not None:
             self.session_conversation[self.active_assistant_index]["content"] += text
             self._refresh_code_block_buttons(self.session_conversation[self.active_assistant_index]["content"])
+        self._update_inline_copy_action()
 
     def _refresh_code_block_buttons(self, assistant_text: str) -> None:
         """Rebuild code-block copy buttons for the latest assistant message."""
@@ -437,16 +390,16 @@ class ResultWindow(QWidget):
         cursor.movePosition(cursor.MoveOperation.End)
         self.text_display.setTextCursor(cursor)
         self.set_loading(False)
-        self.stop_btn.setEnabled(False)
         self.save_session()
+        self._update_inline_copy_action()
 
     @Slot(str)
     def show_error(self, error_msg):
         """Display error message."""
         self.append_text(f"\n\nError: {error_msg}")
         self.set_loading(False)
-        self.stop_btn.setEnabled(False)
         self.save_session()
+        self._update_inline_copy_action()
 
     def capture_followup_screenshot(self):
         """Open screenshot overlay for follow-up."""
@@ -488,6 +441,7 @@ class ResultWindow(QWidget):
         self.append_block(f"You: {prompt}")
         self.session_conversation.append({"role": "user", "content": prompt})
         self.save_session()
+        self._update_inline_copy_action()
 
     def start_assistant_message(self):
         """Start a new assistant response in the display and history."""
@@ -497,8 +451,8 @@ class ResultWindow(QWidget):
         self.session_conversation.append({"role": "assistant", "content": ""})
         self.active_assistant_index = len(self.session_conversation) - 1
         self.set_loading(True)
-        self.stop_btn.setEnabled(True)
         self._refresh_code_block_buttons("")
+        self._update_inline_copy_action()
 
     def build_prompt_with_history(self, new_prompt: str) -> str:
         """Build a prompt including conversation history for context."""
@@ -550,6 +504,7 @@ class ResultWindow(QWidget):
         for entry in entries:
             role = "You" if entry["role"] == "user" else "Assistant"
             self.append_block(f"{role}: {entry['content']}")
+        self._update_inline_copy_action()
 
     def show_history(self):
         """Show the window with the current conversation history."""
@@ -567,6 +522,51 @@ class ResultWindow(QWidget):
         super().resizeEvent(event)
         if not self._embedded and self._show_chrome:
             self.update_background_pixmap()
+
+    @Slot(object)
+    def _on_text_anchor_clicked(self, url):
+        """Handle inline action links embedded in transcript."""
+        if str(url.toString()) == "action://copy-last":
+            self.copy_last_assistant_message()
+
+    def _has_last_assistant_text(self) -> bool:
+        for entry in reversed(self.session_conversation):
+            if entry.get("role") == "assistant" and (entry.get("content") or "").strip():
+                return True
+        return False
+
+    def _copy_action_html(self) -> str:
+        icon_path = Path(get_asset_path("copy.svg")).as_uri()
+        return (
+            "<p style='margin:8px 0 0 0;'>"
+            f"<a href='action://copy-last' style='color:#FFB27A;text-decoration:none;'>"
+            f"<img src='{icon_path}' width='12' height='12' "
+            "style='vertical-align:middle; margin-right:4px; margin-top:3px;'/>"
+            "</a></p>"
+        )
+
+    def _remove_inline_copy_action(self):
+        if self._copy_action_start_pos is None or self._copy_action_end_pos is None:
+            return
+        cursor = self.text_display.textCursor()
+        cursor.setPosition(self._copy_action_start_pos)
+        cursor.setPosition(self._copy_action_end_pos, cursor.MoveMode.KeepAnchor)
+        cursor.removeSelectedText()
+        self._copy_action_start_pos = None
+        self._copy_action_end_pos = None
+
+    def _update_inline_copy_action(self):
+        """Render inline copy action at transcript end (scrolls with content)."""
+        self._remove_inline_copy_action()
+        if not self._has_last_assistant_text():
+            return
+
+        cursor = self.text_display.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        self._copy_action_start_pos = cursor.position()
+        cursor.insertHtml(self._copy_action_html())
+        cursor.movePosition(cursor.MoveOperation.End)
+        self._copy_action_end_pos = cursor.position()
 
     def closeEvent(self, event):
         """Mark session end on close."""
@@ -637,3 +637,4 @@ class ResultWindow(QWidget):
             event.accept()
             return
         super().keyPressEvent(event)
+

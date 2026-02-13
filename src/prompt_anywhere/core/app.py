@@ -11,6 +11,7 @@ from prompt_anywhere.core.agents.codex_agent import CodexAgent
 
 class App:
     """Main application coordinator (business logic only, no GUI)"""
+    SUPPORTED_AGENTS = ("codex", "claude", "gemini")
     
     def __init__(self):
         """Initialize application"""
@@ -45,6 +46,28 @@ class App:
         if agent_name == "codex":
             return CodexAgent()
         raise ValueError(f"Unknown agent: {agent_name}")
+
+    def list_supported_agents(self) -> list[str]:
+        """Return supported agent keys for model selection UI."""
+        return list(self.SUPPORTED_AGENTS)
+
+    def get_current_agent_name(self) -> str:
+        """Return currently configured default agent name."""
+        configured = str(self.config.get("default_agent", "codex"))
+        return configured if configured in self.SUPPORTED_AGENTS else "codex"
+
+    def set_default_agent(self, agent_name: str) -> BaseAgent:
+        """Switch active agent and persist as default."""
+        normalized = str(agent_name).strip().lower()
+        if normalized not in self.SUPPORTED_AGENTS:
+            raise ValueError(f"Unknown agent: {agent_name}")
+
+        agent = self._create_agent(normalized)
+        self.agent = agent
+        self.agent_error = None
+        self.config.set("default_agent", normalized)
+        print(f"* Switched agent to {agent.name.capitalize()}")
+        return agent
     
     def register_hotkey(self, callback):
         """Register global hotkey with callback"""

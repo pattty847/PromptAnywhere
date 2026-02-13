@@ -49,6 +49,8 @@ class PromptShellWindow(QWidget):
     follow_up_submitted = Signal(str, object)  # prompt, image_bytes
     session_closed = Signal()
     history_session_selected = Signal(str)
+    agent_selected = Signal(str)
+    stop_requested = Signal()
 
     def __init__(self):
         super().__init__()
@@ -61,7 +63,7 @@ class PromptShellWindow(QWidget):
 
         self._drawer_open = False
         self._drawer_anim: QVariantAnimation | None = None
-        self._drawer_open_height = 320
+        self._drawer_open_height = 380
         self._history_return_target = "collapsed"
         self._drawer_bottom_anchor: int | None = None
         self._saved_size_constraint: QLayout.SizeConstraint | None = None
@@ -213,6 +215,8 @@ class PromptShellWindow(QWidget):
         self.close_btn.clicked.connect(self.hide)
         self.prompt_widget.prompt_submitted.connect(self._on_prompt_submitted)
         self.prompt_widget.feature_triggered.connect(self.feature_triggered)
+        self.prompt_widget.agent_selected.connect(self.agent_selected)
+        self.prompt_widget.stop_requested.connect(self.stop_requested)
         self.result_widget.follow_up_submitted.connect(self.follow_up_submitted)
         self.result_widget.session_closed.connect(self.session_closed)
 
@@ -440,6 +444,18 @@ class PromptShellWindow(QWidget):
 
     def focus_input(self) -> None:
         self.prompt_widget.input_field.setFocus()
+
+    def set_available_agents(self, agent_names: list[str]) -> None:
+        """Update compact model dropdown options in embedded prompt panel."""
+        self.prompt_widget.set_available_agents(agent_names)
+
+    def set_selected_agent(self, agent_name: str) -> None:
+        """Set active model selection in embedded prompt panel."""
+        self.prompt_widget.set_selected_agent(agent_name)
+
+    def set_streaming_state(self, active: bool) -> None:
+        """Toggle prompt send button between Send and Stop modes."""
+        self.prompt_widget.set_streaming_state(active)
 
     def _build_history_widget(self) -> QWidget:
         """Create in-drawer history panel."""

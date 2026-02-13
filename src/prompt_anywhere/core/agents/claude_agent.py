@@ -26,7 +26,7 @@ class ClaudeAgent(BaseAgent):
 
     def send_prompt(self, prompt: str, context: Optional[dict] = None) -> Iterator[str]:
         """Send a text prompt to Claude CLI and stream stdout lines."""
-        del context  # Text-only backend for now.
+        cancel_event = context.get("cancel_event") if context else None
         cmd = [self._cli, prompt]
 
         popen_kwargs = {
@@ -46,6 +46,10 @@ class ClaudeAgent(BaseAgent):
 
         process = subprocess.Popen(cmd, **popen_kwargs)
         for line in iter(process.stdout.readline, ""):
+            if cancel_event is not None and cancel_event.is_set():
+                process.terminate()
+                process.wait()
+                return
             if line:
                 yield line
         process.wait()

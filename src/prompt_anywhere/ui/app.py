@@ -4,7 +4,7 @@ import sys
 import signal
 import time
 from typing import Optional
-from threading import Thread
+from threading import Event, Thread
 
 # Import pynput-dependent core before PySide6 to avoid shibokensupport/six conflict
 from prompt_anywhere.core.app import App
@@ -39,14 +39,23 @@ class AgentWorker(Thread):
         self.prompt = prompt
         self.image_bytes = image_bytes
         self.signals = StreamSignals()
+        self._cancel_event = Event()
+
+    def stop(self):
+        """Request cancellation of the active agent stream."""
+        self._cancel_event.set()
     
     def run(self):
         """Run agent in background thread"""
         try:
-            context = {'image_bytes': self.image_bytes} if self.image_bytes else None
+            context = {'cancel_event': self._cancel_event}
+            if self.image_bytes:
+                context['image_bytes'] = self.image_bytes
             
             # Stream response from agent
             for chunk in self.agent.send_prompt(self.prompt, context):
+                if self._cancel_event.is_set():
+                    break
                 self.signals.text_chunk.emit(chunk)
             
             self.signals.finished.emit()
@@ -62,6 +71,11 @@ class MockAgentWorker(Thread):
         self.prompt = prompt
         self.image_bytes = image_bytes
         self.signals = StreamSignals()
+        self._cancel_event = Event()
+
+    def stop(self):
+        """Request cancellation of mock stream."""
+        self._cancel_event.set()
 
     def run(self):
         """Stream mock chunks that resemble real output pacing."""
@@ -75,6 +89,8 @@ class MockAgentWorker(Thread):
                 "Disable Mock Response Mode from the tray menu when you want real agent output again.",
             ]
             for chunk in chunks:
+                if self._cancel_event.is_set():
+                    break
                 self.signals.text_chunk.emit(chunk)
                 time.sleep(0.08)
             self.signals.finished.emit()
@@ -184,11 +200,17 @@ class PromptAnywhereApp:
             self.shell_window.feature_triggered.connect(self.handle_feature)
             self.shell_window.session_closed.connect(self.on_result_window_closed)
             self.shell_window.history_session_selected.connect(self.open_history_session)
+            self.shell_window.agent_selected.connect(self.on_agent_selected)
+            self.shell_window.stop_requested.connect(self.stop_streaming)
+
+        self.shell_window.set_available_agents(self.core_app.list_supported_agents())
+        self.shell_window.set_selected_agent(self.core_app.get_current_agent_name())
 
         self.shell_window.show()
         self.shell_window.raise_()
         self.shell_window.activateWindow()
         self.shell_window.focus_input()
+        self.shell_window.set_streaming_state(False)
     
     @Slot(str, str)
     def handle_feature(self, feature_name: str, prompt: str):
@@ -235,6 +257,7 @@ class PromptAnywhereApp:
         chat.add_user_message(prompt)
         chat.start_assistant_message()
         self.shell_window.open_drawer(animated=True)
+        self.shell_window.set_streaming_state(True)
 
         if self.mock_response_mode:
             self.worker = MockAgentWorker(prompt, image_bytes)
@@ -256,8 +279,24 @@ class PromptAnywhereApp:
         chat = self.shell_window.result_widget
         self.worker.signals.text_chunk.connect(chat.append_text)
         self.worker.signals.finished.connect(chat.set_finished)
+        self.worker.signals.finished.connect(self.on_stream_finished)
         self.worker.signals.error.connect(chat.show_error)
+        self.worker.signals.error.connect(self.on_stream_finished)
         self.worker.start()
+
+    @Slot()
+    def stop_streaming(self):
+        """Stop active stream when user presses Stop in prompt panel."""
+        if self.worker and hasattr(self.worker, "stop"):
+            self.worker.stop()
+        if self.shell_window:
+            self.shell_window.set_streaming_state(False)
+
+    @Slot()
+    def on_stream_finished(self):
+        """Reset send/stop state once streaming completes or errors."""
+        if self.shell_window:
+            self.shell_window.set_streaming_state(False)
 
     def show_history_window(self):
         """Open history inside the shell drawer."""
@@ -287,6 +326,22 @@ class PromptAnywhereApp:
             chat = self.shell_window.result_widget
             chat.load_sessions()
             self.shell_window.set_history_sessions(chat.saved_sessions)
+
+    @Slot(str)
+    def on_agent_selected(self, agent_name: str):
+        """Switch active agent from compact model dropdown."""
+        try:
+            self.core_app.set_default_agent(agent_name)
+        except Exception as e:
+            error_text = str(e)
+            print(f"Agent switch failed: {error_text}")
+            if self.shell_window:
+                self.shell_window.set_selected_agent(self.core_app.get_current_agent_name())
+                QMessageBox.warning(
+                    self.shell_window,
+                    "Model Switch Failed",
+                    error_text,
+                )
     
     def run(self):
         """Start application loop"""

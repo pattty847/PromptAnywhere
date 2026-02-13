@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-    QLineEdit, QLabel, QGridLayout, QSizePolicy, QFrame, QLayout, QStackedLayout
+    QLineEdit, QLabel, QGridLayout, QSizePolicy, QFrame, QLayout, QStackedLayout, QComboBox
 )
 from PySide6.QtCore import Qt, Signal, Slot, QSize
 from PySide6.QtGui import QCursor, QPixmap, QIcon
@@ -30,6 +30,8 @@ class MainPromptWindow(QWidget):
 
     prompt_submitted = Signal(str, object)  # prompt, image_bytes
     feature_triggered = Signal(str, str)  # feature_name, prompt
+    agent_selected = Signal(str)  # agent_name
+    stop_requested = Signal()
 
     def __init__(self, embedded: bool = False, show_chrome: bool = True):
         super().__init__()
@@ -55,6 +57,12 @@ class MainPromptWindow(QWidget):
         self.feature_name_labels = []
         self.feature_hotkey_labels = []
         self.feature_icon_labels = []
+        self._available_agents = ["codex", "claude", "gemini"]
+        self._agent_colors = {
+            "codex": "rgba(102, 201, 255, 0.95)",
+            "claude": "rgba(255, 171, 94, 0.95)",
+            "gemini": "rgba(126, 233, 156, 0.95)",
+        }
 
         # Position at center of screen (top-level mode only)
         if not self._embedded:
@@ -63,6 +71,7 @@ class MainPromptWindow(QWidget):
         self.screenshot_bytes = None
         self.screenshot_overlay = None
         self.drag_position = None
+        self._streaming_active = False
 
         self.setup_ui()
         if not self._embedded:
@@ -255,6 +264,15 @@ class MainPromptWindow(QWidget):
         self.customize_btn.clicked.connect(lambda: self.trigger_feature("customize"))
         bottom_layout.addWidget(self.customize_btn)
 
+        self.model_combo = QComboBox()
+        self.model_combo.setObjectName("modelSelector")
+        self.model_combo.setFixedHeight(18)
+        self.model_combo.setMinimumWidth(60)
+        self.model_combo.setStyleSheet(self.model_selector_stylesheet())
+        self._populate_agent_options()
+        self.model_combo.currentIndexChanged.connect(self._on_model_combo_changed)
+        bottom_layout.addWidget(self.model_combo)
+
         self._container_layout.addLayout(bottom_layout)
 
         self.content_widget.setLayout(self._container_layout)
@@ -274,7 +292,7 @@ class MainPromptWindow(QWidget):
     def _wire_signals(self):
         """Connect widget signals to slots."""
         self.input_field.returnPressed.connect(self.submit_prompt)
-        self.send_btn.clicked.connect(self.submit_prompt)
+        self.send_btn.clicked.connect(self._on_send_button_clicked)
         self.screenshot_btn.clicked.connect(self.capture_screenshot)
         if self._show_chrome:
             self.close_btn.clicked.connect(self.close)
@@ -466,6 +484,26 @@ class MainPromptWindow(QWidget):
             }}
         """
 
+    def stop_button_stylesheet(self) -> str:
+        return f"""
+            QPushButton {{
+                background-color: rgba(185, 72, 72, 220);
+                color: #FFFFFF;
+                border: none;
+                border-radius: 6px;
+                padding: 0px;
+                font-family: 'Segoe UI', sans-serif;
+                font-size: {self.scaled_pt(8)}pt;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: rgba(210, 86, 86, 235);
+            }}
+            QPushButton:pressed {{
+                background-color: rgba(160, 58, 58, 210);
+            }}
+        """
+
     def utility_button_stylesheet(self) -> str:
         return f"""
             QPushButton {{
@@ -552,6 +590,36 @@ class MainPromptWindow(QWidget):
             }}
         """
 
+    def model_selector_stylesheet(self) -> str:
+        return f"""
+            QComboBox#modelSelector {{
+                background-color: rgba(22, 22, 22, 170);
+                color: rgba(255, 255, 255, 0.88);
+                border: 1px solid rgba(255, 255, 255, 0.18);
+                border-radius: 4px;
+                padding: 0px 6px;
+                font-family: 'Segoe UI', sans-serif;
+                font-size: {self.scaled_pt(7)}pt;
+            }}
+            QComboBox#modelSelector:hover {{
+                border: 1px solid rgba(255, 157, 92, 0.5);
+            }}
+            QComboBox#modelSelector::drop-down {{
+                border: none;
+                width: 14px;
+            }}
+            QComboBox#modelSelector::down-arrow {{
+                image: none;
+            }}
+            QComboBox#modelSelector QAbstractItemView {{
+                background-color: rgba(22, 22, 22, 230);
+                color: rgba(255, 255, 255, 0.92);
+                border: 1px solid rgba(255, 157, 92, 0.3);
+                selection-background-color: rgba(255, 157, 92, 0.18);
+                outline: none;
+            }}
+        """
+
     def adjust_font_scale(self, delta: int):
         """Adjust font scale within allowed range."""
         self.font_scale = max(self.min_font_scale, min(self.max_font_scale, self.font_scale + delta))
@@ -570,9 +638,10 @@ class MainPromptWindow(QWidget):
         self.input_field.setStyleSheet(self.input_stylesheet())
         self.input_field.setFixedHeight(self.scaled_height(32))
 
-        self.send_btn.setStyleSheet(self.send_button_stylesheet())
+        self.send_btn.setStyleSheet(
+            self.stop_button_stylesheet() if self._streaming_active else self.send_button_stylesheet()
+        )
         self.send_btn.setFixedHeight(self.scaled_height(32))
-        set_button_icon(self.send_btn, get_icon_name("send"), self.scaled_icon_size(12))
 
         for btn in self.utility_buttons:
             btn.setStyleSheet(self.utility_button_stylesheet())
@@ -596,11 +665,72 @@ class MainPromptWindow(QWidget):
         self.tip_label.setStyleSheet(self.tip_label_stylesheet())
         self.customize_btn.setStyleSheet(self.customize_button_stylesheet())
         self.customize_btn.setFixedHeight(self.scaled_height(18))
+        self.model_combo.setStyleSheet(self.model_selector_stylesheet())
+        self.model_combo.setFixedHeight(self.scaled_height(18))
 
         self.font_down_btn.setStyleSheet(self.font_button_stylesheet())
         self.font_up_btn.setStyleSheet(self.font_button_stylesheet())
         self.font_down_btn.setFixedSize(self.scaled_height(18), self.scaled_height(18))
         self.font_up_btn.setFixedSize(self.scaled_height(18), self.scaled_height(18))
+
+    def _on_send_button_clicked(self):
+        """Send prompt normally, or request stream stop while active."""
+        if self._streaming_active:
+            self.stop_requested.emit()
+            return
+        self.submit_prompt()
+
+    def set_streaming_state(self, active: bool):
+        """Toggle send button between Send and Stop modes."""
+        self._streaming_active = active
+        self.send_btn.setText("Stop" if active else "Send")
+        self.send_btn.setStyleSheet(
+            self.stop_button_stylesheet() if active else self.send_button_stylesheet()
+        )
+
+    def _agent_display_name(self, agent_name: str) -> str:
+        if agent_name == "codex":
+            return "Codex"
+        if agent_name == "claude":
+            return "Claude"
+        if agent_name == "gemini":
+            return "Gemini"
+        return agent_name.capitalize()
+
+    def _populate_agent_options(self) -> None:
+        self.model_combo.blockSignals(True)
+        self.model_combo.clear()
+        for agent_name in self._available_agents:
+            self.model_combo.addItem(self._agent_display_name(agent_name), agent_name)
+        self.model_combo.blockSignals(False)
+
+    def _on_model_combo_changed(self, index: int) -> None:
+        agent_name = self.model_combo.itemData(index)
+        if not agent_name:
+            return
+        self.agent_selected.emit(str(agent_name))
+
+    def set_available_agents(self, agent_names: list[str]) -> None:
+        """Set selectable agents shown in the compact model dropdown."""
+        filtered = [name for name in agent_names if isinstance(name, str) and name.strip()]
+        if not filtered:
+            return
+        self._available_agents = filtered
+        self._populate_agent_options()
+
+    def current_agent(self) -> str:
+        """Return currently selected agent key."""
+        value = self.model_combo.currentData()
+        return str(value) if value else "codex"
+
+    def set_selected_agent(self, agent_name: str) -> None:
+        """Select a specific agent in UI without re-emitting."""
+        index = self.model_combo.findData(agent_name)
+        if index < 0:
+            return
+        self.model_combo.blockSignals(True)
+        self.model_combo.setCurrentIndex(index)
+        self.model_combo.blockSignals(False)
 
     def resize_to_contents(self):
         """Resize window to match current UI content size."""
