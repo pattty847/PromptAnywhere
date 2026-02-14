@@ -1,6 +1,6 @@
-"""Result window with streaming response."""
+"""Result window with streaming response displayed as chat bubbles."""
+
 from datetime import datetime
-from pathlib import Path
 from uuid import uuid4
 
 from PySide6.QtCore import Qt, Signal, Slot
@@ -10,9 +10,9 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLineEdit,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QStackedLayout,
-    QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
@@ -29,16 +29,17 @@ from prompt_anywhere.ui.services.session_manager import (
     load_sessions as load_sessions_from_disk,
     save_session as save_session_to_disk,
 )
+from prompt_anywhere.ui.widgets.chat_bubble import ChatBubble
 from prompt_anywhere.ui.windows.screenshot_overlay import ScreenshotOverlay
 from prompt_anywhere.ui.windows.result_window_actions import copy_to_clipboard, update_code_block_bar
 
 
 class ResultWindow(QWidget):
-    """Result UI.
+    """Result UI using per-message chat bubbles.
 
-    When `embedded=True`, the widget is meant to be hosted inside another window
-    (e.g., PromptShellWindow) and should not set top-level window flags or
-    reposition itself.
+    When ``embedded=True``, the widget is meant to be hosted inside another
+    window (e.g., PromptShellWindow) and should not set top-level window
+    flags or reposition itself.
     """
 
     follow_up_submitted = Signal(str, object)  # prompt, image_bytes
@@ -69,9 +70,9 @@ class ResultWindow(QWidget):
 
         self.session_id = None
         self.session_created_at = None
-        self.session_conversation = []
-        self.saved_sessions = []
-        self.active_assistant_index = None
+        self.session_conversation: list[dict] = []
+        self.saved_sessions: list[dict] = []
+        self.active_assistant_index: int | None = None
         self.history_path = get_session_history_path()
 
         if not self._embedded:
@@ -81,10 +82,14 @@ class ResultWindow(QWidget):
         self.screenshot_bytes = None
         self.screenshot_overlay = None
         self.drag_position = None
-        self._copy_action_start_pos: int | None = None
-        self._copy_action_end_pos: int | None = None
+
+        # Chat bubble tracking
+        self._bubbles: list[ChatBubble] = []
+        self._active_bubble: ChatBubble | None = None
 
         self.setup_ui()
+
+    # -- Setup ----------------------------------------------------------------
 
     def setup_ui(self):
         """Create UI elements."""
@@ -136,8 +141,8 @@ class ResultWindow(QWidget):
         if self._show_chrome:
             self._container_layout.setContentsMargins(12, 10, 12, 10)
         else:
-            self._container_layout.setContentsMargins(5, 5, 5, 5)
-        self._container_layout.setSpacing(6)
+            self._container_layout.setContentsMargins(5, 2, 5, 2)
+        self._container_layout.setSpacing(4)
 
         self.loading_label = QLabel("Loading...")
         self.loading_label.setStyleSheet(
@@ -199,31 +204,48 @@ class ResultWindow(QWidget):
         self._container_layout.addLayout(title_layout)
 
     def _build_main_content(self):
-        """Build text display, code blocks bar, and optional follow-up input."""
-        self.text_display = QTextBrowser()
-        self.text_display.setReadOnly(True)
-        self.text_display.setOpenLinks(False)
-        self.text_display.setOpenExternalLinks(False)
-        self.text_display.setStyleSheet(
+        """Build chat scroll area, code blocks bar, and optional follow-up input."""
+        # -- Scroll area with chat bubbles ------------------------------------
+        self._chat_scroll = QScrollArea()
+        self._chat_scroll.setWidgetResizable(True)
+        self._chat_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._chat_scroll.setStyleSheet(
             """
-            QTextEdit {
-                background-color: rgba(22, 22, 22, 230);
-                color: #FFFFFF;
-                border: 1px solid rgba(255, 157, 92, 0.3);
-                border-radius: 6px;
-                padding: 10px;
-                font-family: 'Segoe UI', sans-serif;
-                font-size: 10pt;
-                line-height: 1.3;
+            QScrollArea {
+                background: transparent;
+                border: none;
             }
-            QTextEdit:focus {
-                border: 1px solid rgba(255, 157, 92, 0.6);
+            QScrollBar:vertical {
+                background: rgba(30, 30, 30, 80);
+                width: 6px;
+                border-radius: 3px;
+                margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background: rgba(255, 255, 255, 0.18);
+                min-height: 24px;
+                border-radius: 3px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: rgba(255, 255, 255, 0.30);
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
             }
             """
         )
-        self.text_display.setPlainText("Loading...")
-        self._container_layout.addWidget(self.text_display, stretch=1)
 
+        self._chat_container = QWidget()
+        self._chat_container.setStyleSheet("QWidget { background: transparent; border: none; }")
+        self._chat_layout = QVBoxLayout(self._chat_container)
+        self._chat_layout.setContentsMargins(0, 0, 0, 0)
+        self._chat_layout.setSpacing(6)
+        self._chat_layout.addStretch()
+
+        self._chat_scroll.setWidget(self._chat_container)
+        self._container_layout.addWidget(self._chat_scroll, stretch=1)
+
+        # -- Code blocks bar --------------------------------------------------
         self.code_blocks_bar = QWidget()
         self.code_blocks_bar.setVisible(False)
         self.code_blocks_layout = QHBoxLayout()
@@ -234,6 +256,7 @@ class ResultWindow(QWidget):
 
         self._last_code_blocks: list[str] = []
 
+        # -- Follow-up input --------------------------------------------------
         if self._show_followup_input:
             followup_row = QHBoxLayout()
             followup_row.setContentsMargins(0, 0, 0, 0)
@@ -324,7 +347,6 @@ class ResultWindow(QWidget):
 
     def _wire_signals(self):
         """Connect widget signals to slots."""
-        self.text_display.anchorClicked.connect(self._on_text_anchor_clicked)
         if self._show_chrome:
             self.close_btn.clicked.connect(self.close)
         if self._show_followup_input:
@@ -333,46 +355,110 @@ class ResultWindow(QWidget):
             self.followup_send_btn.clicked.connect(self.submit_followup)
 
     def _apply_initial_state(self):
-        """Load sessions, update background, clear placeholder text."""
+        """Load sessions, update background."""
         self.load_sessions()
         if not self._embedded and self._show_chrome:
             self.update_background_pixmap()
-        self.text_display.setText("")
-        self._update_inline_copy_action()
+
+    # -- Bubble management ----------------------------------------------------
+
+    def _add_bubble(self, role: str, content: str = "") -> ChatBubble:
+        """Create a new chat bubble and add it to the scroll area."""
+        bubble = ChatBubble(role=role, content=content)
+        self._bubbles.append(bubble)
+        # Insert before the trailing stretch
+        idx = self._chat_layout.count() - 1
+        self._chat_layout.insertWidget(idx, bubble)
+        return bubble
+
+    def _clear_bubbles(self) -> None:
+        """Remove all chat bubbles."""
+        for bubble in self._bubbles:
+            self._chat_layout.removeWidget(bubble)
+            bubble.deleteLater()
+        self._bubbles.clear()
+        self._active_bubble = None
+
+    def _scroll_to_bottom(self) -> None:
+        """Scroll the chat area to the bottom."""
+        vbar = self._chat_scroll.verticalScrollBar()
+        vbar.setValue(vbar.maximum())
+
+    def _is_scrolled_to_bottom(self) -> bool:
+        vbar = self._chat_scroll.verticalScrollBar()
+        return (vbar.maximum() - vbar.value()) <= 20
+
+    # -- Public message API ---------------------------------------------------
 
     @Slot(str)
-    def append_text(self, text):
-        """Append streaming text (thread-safe via Qt signal).
+    def append_text(self, text: str) -> None:
+        """Append streaming text to the active assistant bubble.
 
-        Autoscroll policy: only stick to bottom if the user is already at bottom.
+        Autoscroll policy: only stick to bottom if user is already near bottom.
         """
-        self._remove_inline_copy_action()
-        self.clear_loading_placeholder()
+        if self._active_bubble is None:
+            return
 
-        vbar = self.text_display.verticalScrollBar()
-        was_at_bottom = (vbar.maximum() - vbar.value()) <= 6
-
-        cursor = self.text_display.textCursor()
-        cursor.movePosition(cursor.MoveOperation.End)
-        cursor.insertText(text)
-        self.text_display.setTextCursor(cursor)
+        was_at_bottom = self._is_scrolled_to_bottom()
+        self._active_bubble.append_content(text)
 
         if was_at_bottom:
-            self.text_display.ensureCursorVisible()
+            self._scroll_to_bottom()
 
         if self.active_assistant_index is not None:
             self.session_conversation[self.active_assistant_index]["content"] += text
-            self._refresh_code_block_buttons(self.session_conversation[self.active_assistant_index]["content"])
-        self._update_inline_copy_action()
 
-    def _refresh_code_block_buttons(self, assistant_text: str) -> None:
-        """Rebuild code-block copy buttons for the latest assistant message."""
-        self._last_code_blocks = update_code_block_bar(
-            self.code_blocks_bar,
-            self.code_blocks_layout,
-            assistant_text,
-            on_copy=copy_to_clipboard,
-        )
+    @Slot()
+    def set_finished(self) -> None:
+        """Mark the current response as complete."""
+        if self.active_assistant_index is not None:
+            self._refresh_code_block_buttons(
+                self.session_conversation[self.active_assistant_index]["content"]
+            )
+        self._active_bubble = None
+        self.set_loading(False)
+        self.save_session()
+
+    @Slot(str)
+    def show_error(self, error_msg: str) -> None:
+        """Display error in the active bubble or as a new message."""
+        if self._active_bubble:
+            self._active_bubble.append_content(f"\n\nError: {error_msg}")
+        else:
+            self._add_bubble("assistant", f"Error: {error_msg}")
+        self.set_loading(False)
+        self.save_session()
+        self._scroll_to_bottom()
+
+    def add_user_message(self, prompt: str) -> None:
+        """Append a user message bubble and record in history."""
+        self.ensure_session()
+        self._add_bubble("user", prompt)
+        self.session_conversation.append({"role": "user", "content": prompt})
+        self.save_session()
+        self._scroll_to_bottom()
+
+    def start_assistant_message(self) -> None:
+        """Start a new empty assistant bubble for streaming."""
+        self.ensure_session()
+        bubble = self._add_bubble("assistant")
+        self._active_bubble = bubble
+        self.session_conversation.append({"role": "assistant", "content": ""})
+        self.active_assistant_index = len(self.session_conversation) - 1
+        self.set_loading(True)
+        self._refresh_code_block_buttons("")
+        self._scroll_to_bottom()
+
+    def render_conversation(self, entries=None) -> None:
+        """Render a full conversation as bubbles."""
+        self._clear_bubbles()
+        self.active_assistant_index = None
+        entries = entries if entries is not None else self.session_conversation
+        for entry in entries:
+            role = entry.get("role", "user")
+            content = entry.get("content", "")
+            self._add_bubble(role, content)
+        self._scroll_to_bottom()
 
     def copy_last_assistant_message(self) -> None:
         """Copy the most recent assistant message to clipboard."""
@@ -382,77 +468,6 @@ class ResultWindow(QWidget):
                 last = entry.get("content") or ""
                 break
         copy_to_clipboard(last)
-
-    @Slot()
-    def set_finished(self):
-        """Mark as complete."""
-        cursor = self.text_display.textCursor()
-        cursor.movePosition(cursor.MoveOperation.End)
-        self.text_display.setTextCursor(cursor)
-        self.set_loading(False)
-        self.save_session()
-        self._update_inline_copy_action()
-
-    @Slot(str)
-    def show_error(self, error_msg):
-        """Display error message."""
-        self.append_text(f"\n\nError: {error_msg}")
-        self.set_loading(False)
-        self.save_session()
-        self._update_inline_copy_action()
-
-    def capture_followup_screenshot(self):
-        """Open screenshot overlay for follow-up."""
-        if not hasattr(self, "followup_input"):
-            return
-        window_to_hide = self.window() if self._embedded else self
-        window_to_hide.hide()
-        self.screenshot_overlay = ScreenshotOverlay()
-        self.screenshot_overlay.screenshot_taken.connect(self.on_followup_screenshot_captured)
-        self.screenshot_overlay.show()
-
-    @Slot(bytes)
-    def on_followup_screenshot_captured(self, image_bytes):
-        """Handle captured follow-up screenshot."""
-        self.screenshot_bytes = image_bytes
-        self.screenshot_overlay = None
-        window_to_show = self.window() if self._embedded else self
-        window_to_show.show()
-        if hasattr(self, "followup_input"):
-            self.followup_input.setFocus()
-
-    def submit_followup(self):
-        """Submit follow-up question."""
-        if not hasattr(self, "followup_input"):
-            return
-
-        prompt = self.followup_input.text().strip()
-        if not prompt:
-            return
-
-        self.follow_up_submitted.emit(prompt, self.screenshot_bytes)
-        self.followup_input.clear()
-        self.screenshot_bytes = None
-
-    def add_user_message(self, prompt: str):
-        """Append a user message to the display and history."""
-        self.ensure_session()
-        self.clear_loading_placeholder()
-        self.append_block(f"You: {prompt}")
-        self.session_conversation.append({"role": "user", "content": prompt})
-        self.save_session()
-        self._update_inline_copy_action()
-
-    def start_assistant_message(self):
-        """Start a new assistant response in the display and history."""
-        self.ensure_session()
-        self.clear_loading_placeholder()
-        self.append_block("Assistant:")
-        self.session_conversation.append({"role": "assistant", "content": ""})
-        self.active_assistant_index = len(self.session_conversation) - 1
-        self.set_loading(True)
-        self._refresh_code_block_buttons("")
-        self._update_inline_copy_action()
 
     def build_prompt_with_history(self, new_prompt: str) -> str:
         """Build a prompt including conversation history for context."""
@@ -467,23 +482,69 @@ class ResultWindow(QWidget):
         lines.append("Assistant:")
         return "\n".join(lines)
 
-    def get_background_path(self) -> str:
-        """Return the background image path."""
-        return get_asset_path("background.png")
+    # -- Code blocks ----------------------------------------------------------
 
-    def update_background_pixmap(self):
-        """Scale and apply the background image to the container."""
-        if not self._show_chrome:
-            return
-        common_update_background_pixmap(
-            self.background_label, self.background_pixmap, self.container.size()
+    def _refresh_code_block_buttons(self, assistant_text: str) -> None:
+        """Rebuild code-block copy buttons for the latest assistant message."""
+        self._last_code_blocks = update_code_block_bar(
+            self.code_blocks_bar,
+            self.code_blocks_layout,
+            assistant_text,
+            on_copy=copy_to_clipboard,
         )
 
-    def load_sessions(self):
+    # -- Follow-up ------------------------------------------------------------
+
+    def capture_followup_screenshot(self) -> None:
+        """Open screenshot overlay for follow-up."""
+        if not hasattr(self, "followup_input"):
+            return
+        window_to_hide = self.window() if self._embedded else self
+        window_to_hide.hide()
+        self.screenshot_overlay = ScreenshotOverlay()
+        self.screenshot_overlay.screenshot_taken.connect(self.on_followup_screenshot_captured)
+        self.screenshot_overlay.show()
+
+    @Slot(bytes)
+    def on_followup_screenshot_captured(self, image_bytes: bytes) -> None:
+        """Handle captured follow-up screenshot."""
+        self.screenshot_bytes = image_bytes
+        self.screenshot_overlay = None
+        window_to_show = self.window() if self._embedded else self
+        window_to_show.show()
+        if hasattr(self, "followup_input"):
+            self.followup_input.setFocus()
+
+    def submit_followup(self) -> None:
+        """Submit follow-up question."""
+        if not hasattr(self, "followup_input"):
+            return
+        prompt = self.followup_input.text().strip()
+        if not prompt:
+            return
+        self.follow_up_submitted.emit(prompt, self.screenshot_bytes)
+        self.followup_input.clear()
+        self.screenshot_bytes = None
+
+    # -- Session management ---------------------------------------------------
+
+    def ensure_session(self) -> None:
+        """Ensure there is an active session."""
+        if self.session_id:
+            return
+        self.session_id = self.generate_session_id()
+        self.session_created_at = datetime.now().isoformat(timespec="seconds")
+        self.session_conversation = []
+
+    def generate_session_id(self) -> str:
+        """Generate a unique session ID."""
+        return f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:8]}"
+
+    def load_sessions(self) -> None:
         """Load session history from disk for history view."""
         self.saved_sessions = load_sessions_from_disk(self.history_path)
 
-    def save_session(self):
+    def save_session(self) -> None:
         """Persist the current session to disk."""
         if not self.session_id:
             return
@@ -496,100 +557,7 @@ class ResultWindow(QWidget):
         }
         save_session_to_disk(self.history_path, session_payload)
 
-    def render_conversation(self, entries=None):
-        """Render the selected conversation history in the display."""
-        self.text_display.setText("")
-        self.active_assistant_index = None
-        entries = entries if entries is not None else self.session_conversation
-        for entry in entries:
-            role = "You" if entry["role"] == "user" else "Assistant"
-            self.append_block(f"{role}: {entry['content']}")
-        self._update_inline_copy_action()
-
-    def show_history(self):
-        """Show the window with the current conversation history."""
-        if self.session_id:
-            self.render_conversation(self.session_conversation)
-        self.show()
-
-    def set_loading(self, is_loading: bool):
-        """Toggle loading indicator."""
-        if hasattr(self, "loading_label"):
-            self.loading_label.setVisible(is_loading)
-
-    def resizeEvent(self, event):
-        """Keep background image in sync with window size."""
-        super().resizeEvent(event)
-        if not self._embedded and self._show_chrome:
-            self.update_background_pixmap()
-
-    @Slot(object)
-    def _on_text_anchor_clicked(self, url):
-        """Handle inline action links embedded in transcript."""
-        if str(url.toString()) == "action://copy-last":
-            self.copy_last_assistant_message()
-
-    def _has_last_assistant_text(self) -> bool:
-        for entry in reversed(self.session_conversation):
-            if entry.get("role") == "assistant" and (entry.get("content") or "").strip():
-                return True
-        return False
-
-    def _copy_action_html(self) -> str:
-        icon_path = Path(get_asset_path("copy.svg")).as_uri()
-        return (
-            "<p style='margin:8px 0 0 0;'>"
-            f"<a href='action://copy-last' style='color:#FFB27A;text-decoration:none;'>"
-            f"<img src='{icon_path}' width='12' height='12' "
-            "style='vertical-align:middle; margin-right:4px; margin-top:3px;'/>"
-            "</a></p>"
-        )
-
-    def _remove_inline_copy_action(self):
-        if self._copy_action_start_pos is None or self._copy_action_end_pos is None:
-            return
-        cursor = self.text_display.textCursor()
-        cursor.setPosition(self._copy_action_start_pos)
-        cursor.setPosition(self._copy_action_end_pos, cursor.MoveMode.KeepAnchor)
-        cursor.removeSelectedText()
-        self._copy_action_start_pos = None
-        self._copy_action_end_pos = None
-
-    def _update_inline_copy_action(self):
-        """Render inline copy action at transcript end (scrolls with content)."""
-        self._remove_inline_copy_action()
-        if not self._has_last_assistant_text():
-            return
-
-        cursor = self.text_display.textCursor()
-        cursor.movePosition(cursor.MoveOperation.End)
-        self._copy_action_start_pos = cursor.position()
-        cursor.insertHtml(self._copy_action_html())
-        cursor.movePosition(cursor.MoveOperation.End)
-        self._copy_action_end_pos = cursor.position()
-
-    def closeEvent(self, event):
-        """Mark session end on close."""
-        self.save_session()
-        self.session_id = None
-        self.session_conversation = []
-        self.active_assistant_index = None
-        self.session_closed.emit()
-        super().closeEvent(event)
-
-    def ensure_session(self):
-        """Ensure there is an active session."""
-        if self.session_id:
-            return
-        self.session_id = self.generate_session_id()
-        self.session_created_at = datetime.now().isoformat(timespec="seconds")
-        self.session_conversation = []
-
-    def generate_session_id(self) -> str:
-        """Generate a unique session ID."""
-        return f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:8]}"
-
-    def load_session(self, session_id: str):
+    def load_session(self, session_id: str) -> None:
         """Load a saved session by ID into the window."""
         self.load_sessions()
         session = load_session_by_id(self.history_path, session_id)
@@ -599,35 +567,64 @@ class ResultWindow(QWidget):
             self.session_conversation = session.get("messages", [])
             self.render_conversation(self.session_conversation)
 
-    def clear_loading_placeholder(self):
-        """Clear any loading placeholder text."""
-        if self.text_display.toPlainText().strip() in ("Loading...",):
-            self.text_display.clear()
+    def show_history(self) -> None:
+        """Show the window with the current conversation history."""
+        if self.session_id:
+            self.render_conversation(self.session_conversation)
+        self.show()
 
-    def append_block(self, text: str):
-        """Append a block of text separated by blank lines."""
-        cursor = self.text_display.textCursor()
-        cursor.movePosition(cursor.MoveOperation.End)
-        if self.text_display.toPlainText().strip():
-            cursor.insertText("\n\n")
-        cursor.insertText(text + "\n")
-        self.text_display.setTextCursor(cursor)
+    # -- Loading / background -------------------------------------------------
 
-    def mousePressEvent(self, event):
+    def set_loading(self, is_loading: bool) -> None:
+        """Toggle loading indicator."""
+        if hasattr(self, "loading_label"):
+            self.loading_label.setVisible(is_loading)
+
+    def get_background_path(self) -> str:
+        """Return the background image path."""
+        return get_asset_path("background.png")
+
+    def update_background_pixmap(self) -> None:
+        """Scale and apply the background image to the container."""
+        if not self._show_chrome:
+            return
+        common_update_background_pixmap(
+            self.background_label, self.background_pixmap, self.container.size()
+        )
+
+    def resizeEvent(self, event) -> None:
+        """Keep background image in sync with window size."""
+        super().resizeEvent(event)
+        if not self._embedded and self._show_chrome:
+            self.update_background_pixmap()
+
+    # -- Window events --------------------------------------------------------
+
+    def closeEvent(self, event) -> None:
+        """Mark session end on close."""
+        self.save_session()
+        self.session_id = None
+        self.session_conversation = []
+        self.active_assistant_index = None
+        self._clear_bubbles()
+        self.session_closed.emit()
+        super().closeEvent(event)
+
+    def mousePressEvent(self, event) -> None:
         """Enable window dragging (top-level only)."""
         if self._embedded:
             return super().mousePressEvent(event)
         if event.button() == Qt.MouseButton.LeftButton:
             self.drag_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
 
-    def mouseMoveEvent(self, event):
+    def mouseMoveEvent(self, event) -> None:
         """Handle window dragging (top-level only)."""
         if self._embedded:
             return super().mouseMoveEvent(event)
         if event.buttons() == Qt.MouseButton.LeftButton and self.drag_position:
             self.move(event.globalPosition().toPoint() - self.drag_position)
 
-    def keyPressEvent(self, event):
+    def keyPressEvent(self, event) -> None:
         """ESC or Q to close in top-level mode only."""
         if event.key() in (Qt.Key.Key_Escape, Qt.Key.Key_Q):
             if self._embedded:
@@ -637,4 +634,3 @@ class ResultWindow(QWidget):
             event.accept()
             return
         super().keyPressEvent(event)
-
