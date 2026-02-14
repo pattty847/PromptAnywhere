@@ -64,6 +64,7 @@ class ChatBubble(QFrame):
         super().__init__(parent)
         self._role = role
         self._content = content
+        self._copy_btn: QPushButton | None = None
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -170,12 +171,12 @@ class ChatBubble(QFrame):
     # -- Hover copy -----------------------------------------------------------
 
     def enterEvent(self, event) -> None:
-        if hasattr(self, "_copy_btn"):
+        if self._copy_btn:
             self._copy_btn.setVisible(True)
         super().enterEvent(event)
 
     def leaveEvent(self, event) -> None:
-        if hasattr(self, "_copy_btn"):
+        if self._copy_btn:
             self._copy_btn.setVisible(False)
         super().leaveEvent(event)
 

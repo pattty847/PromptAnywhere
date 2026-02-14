@@ -407,13 +407,14 @@ class ResultWindow(QWidget):
 
         if self.active_assistant_index is not None:
             self.session_conversation[self.active_assistant_index]["content"] += text
-            self._refresh_code_block_buttons(
-                self.session_conversation[self.active_assistant_index]["content"]
-            )
 
     @Slot()
     def set_finished(self) -> None:
         """Mark the current response as complete."""
+        if self.active_assistant_index is not None:
+            self._refresh_code_block_buttons(
+                self.session_conversation[self.active_assistant_index]["content"]
+            )
         self._active_bubble = None
         self.set_loading(False)
         self.save_session()
@@ -424,8 +425,7 @@ class ResultWindow(QWidget):
         if self._active_bubble:
             self._active_bubble.append_content(f"\n\nError: {error_msg}")
         else:
-            bubble = self._add_bubble("assistant", f"Error: {error_msg}")
-            self._bubbles.append(bubble) if bubble not in self._bubbles else None
+            self._add_bubble("assistant", f"Error: {error_msg}")
         self.set_loading(False)
         self.save_session()
         self._scroll_to_bottom()
