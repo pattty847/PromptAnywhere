@@ -1,29 +1,27 @@
-"""Single-window shell with a chat drawer.
+"""Single-window shell: header + collapsible drawer + prompt.
 
-This keeps PromptAnywhere in one floating surface:
-- top: shell header (title + close)
-- middle: collapsible chat drawer (ResultWindow in embedded content mode)
-- bottom: prompt panel (MainPromptWindow in embedded content mode)
-
-Drawer animation uses direct window-geometry manipulation so the prompt
-panel stays perfectly still.  Edge-drag resize handles let the user
-enlarge the window freely.
+Animation approach (matches tools/drawer_jitter_probe.py):
+- NO QVBoxLayout on the content area — children are positioned with
+  setGeometry() in _apply_geometry(), exactly like the probe.
+- _drawer_h tracks current drawer height in pixels (0 when closed).
+- QVariantAnimation ticks call _set_drawer_height() which updates
+  _drawer_h, resizes the window (bottom edge anchored), and calls
+  _apply_geometry() to reposition children.
+- setMask() and background rescale are SKIPPED during animation and
+  applied once on finish.
 """
 
 from __future__ import annotations
 
 import os
-import time
 from datetime import datetime
-from pathlib import Path
+from typing import Optional
 
-from PySide6.QtCore import QEasingCurve, QEvent, QRect, Qt, Signal, QSize, QVariantAnimation
-from PySide6.QtGui import QCursor, QPixmap
+from PySide6.QtCore import QEasingCurve, QRect, Qt, Signal, QVariantAnimation
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QFrame,
-    QHBoxLayout,
     QLabel,
-    QLayout,
     QListWidget,
     QListWidgetItem,
     QPushButton,
@@ -44,15 +42,16 @@ from prompt_anywhere.ui.common import (
 from prompt_anywhere.ui.windows.main_prompt_window import MainPromptWindow
 from prompt_anywhere.ui.windows.result_window import ResultWindow
 
-
 # ---------------------------------------------------------------------------
-#  Constants
+#  Geometry constants (match probe style)
 # ---------------------------------------------------------------------------
-
-_RESIZE_GRIP = 8       # px from each edge that counts as a resize handle
+_MARGIN = 5
+_HEADER_H = 24
+_GAP = 4
+_RESIZE_GRIP = 8
 _MIN_WIDTH = 420
 _MIN_HEIGHT = 180
-_ANIM_DURATION_MS = 200
+_ANIM_DURATION_MS = 180
 
 _EDGE_CURSORS = {
     "top": Qt.CursorShape.SizeVerCursor,
@@ -67,17 +66,17 @@ _EDGE_CURSORS = {
 
 
 class PromptShellWindow(QWidget):
-    """Main always-on-top window containing prompt + drawer."""
+    """Main always-on-top window: header + drawer + prompt."""
 
-    prompt_submitted = Signal(str, object)  # prompt, image_bytes
-    feature_triggered = Signal(str, str)  # feature_name, prompt
-    follow_up_submitted = Signal(str, object)  # prompt, image_bytes
+    prompt_submitted = Signal(str, object)
+    feature_triggered = Signal(str, str)
+    follow_up_submitted = Signal(str, object)
     session_closed = Signal()
     history_session_selected = Signal(str)
     agent_selected = Signal(str)
     stop_requested = Signal()
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
@@ -86,171 +85,113 @@ class PromptShellWindow(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
-        self._drawer_open = False
-        self._drawer_anim: QVariantAnimation | None = None
-        self._drawer_open_height = 380
-        self._bottom_anchor: int | None = None
+        # Drawer state
+        self._drawer_h: int = 0               # current drawer pixel height
+        self._drawer_open: bool = False
+        self._drawer_open_height: int = 380    # target height when open
+        self._drawer_anim: Optional[QVariantAnimation] = None
+        self._animating: bool = False
         self._history_return_target = "collapsed"
 
-        # Resize-handle state
-        self._resize_edge: str | None = None
+        # Resize state
+        self._resize_edge: Optional[str] = None
         self._resize_start_global = None
-        self._resize_start_geo: QRect | None = None
+        self._resize_start_geo: Optional[QRect] = None
         self._drag_pos = None
 
         # Debug
-        self._ui_debug_enabled = self._is_debug_enabled()
-        self._last_anim_debug_ts = 0.0
+        self._ui_debug = os.environ.get(
+            "PROMPT_ANYWHERE_UI_DEBUG", "0"
+        ).strip().lower() in {"1", "true", "on", "yes"}
 
-        self.setup_ui()
+        self._build_ui()
 
-    # ── Setup ────────────────────────────────────────────────────────────
+    # ── Build ────────────────────────────────────────────────────────────
 
-    def setup_ui(self):
-        """Create UI elements."""
-        self._build_container()
-        self._build_header()
-        self._build_main_content()
-        self._wire_signals()
-        self._apply_initial_state()
-
-    def _build_container(self):
-        """Create root layout, container, background, and content widget skeleton."""
-        self._root_layout = QVBoxLayout()
-        self._root_layout.setContentsMargins(0, 0, 0, 0)
-        self._root_layout.setSpacing(0)
-
-        self.container = QWidget()
+    def _build_ui(self) -> None:
+        # -- Background layering (only layout in the whole window) ----------
+        self.container = QWidget(self)
         self.container.setStyleSheet(
-            """
-            QWidget {
-                background-color: transparent;
-                border-radius: 16px;
-                border: 1px solid rgba(255, 255, 255, 0.1);
-            }
-            """
+            "QWidget { background: transparent; border-radius: 16px;"
+            " border: 1px solid rgba(255,255,255,0.1); }"
         )
-
-        self.background_label = FixedBackgroundLabel()
+        self.background_label = FixedBackgroundLabel(self.container)
         self.background_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.background_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
-        self.background_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.background_pixmap = QPixmap(self.get_background_path())
+        self.background_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored
+        )
+        self.background_label.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents
+        )
+        self.background_pixmap = QPixmap(get_asset_path("background.png"))
 
-        self.content_widget = QWidget()
+        self.content_widget = QWidget(self.container)
         self.content_widget.setStyleSheet(
-            """
-            QWidget {
-                background-color: rgba(15, 15, 15, 140);
-                border-radius: 16px;
-            }
-            """
+            "QWidget { background-color: rgba(15,15,15,140);"
+            " border-radius: 16px; }"
         )
 
-        self._content_layout = QVBoxLayout()
-        self._content_layout.setContentsMargins(5, 5, 5, 5)
-        self._content_layout.setSpacing(0)
+        stack = QStackedLayout(self.container)
+        stack.setContentsMargins(0, 0, 0, 0)
+        stack.setStackingMode(QStackedLayout.StackingMode.StackAll)
+        stack.addWidget(self.background_label)
+        stack.addWidget(self.content_widget)
 
-    def _build_header(self):
-        """Build shell header row with title and close button."""
-        header_layout = QHBoxLayout()
-        header_layout.setContentsMargins(0, 0, 0, 4)
-        header_layout.setSpacing(0)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        root.addWidget(self.container)
 
-        self.title_label = QLabel("Prompt Anywhere")
+        # -- Header (children of content_widget, NO layout) -----------------
+        self.title_label = QLabel("Prompt Anywhere", self.content_widget)
         self.title_label.setStyleSheet(
-            """
-            QLabel {
-                color: #FF9D5C;
-                font-family: 'Segoe UI', sans-serif;
-                font-size: 12pt;
-                font-weight: bold;
-                background: transparent;
-                border: none;
-                padding: 0px;
-            }
-            """
+            "QLabel { color: #FF9D5C; font-family: 'Segoe UI', sans-serif;"
+            " font-size: 12pt; font-weight: bold; background: transparent;"
+            " border: none; }"
         )
-        header_layout.addWidget(self.title_label)
-        header_layout.addStretch()
 
-        self.close_btn = QPushButton("")
+        self.close_btn = QPushButton("", self.content_widget)
         self.close_btn.setFixedSize(20, 20)
         self.close_btn.setStyleSheet(
-            """
-            QPushButton {
-                background-color: transparent;
-                color: rgba(255, 255, 255, 0.6);
-                border: none;
-                font-size: 12pt;
-                font-weight: bold;
-                padding: 0px;
-            }
-            QPushButton:hover {
-                color: rgba(255, 255, 255, 1.0);
-            }
-            """
+            "QPushButton { background: transparent;"
+            " color: rgba(255,255,255,0.6); border: none; }"
+            " QPushButton:hover { color: rgba(255,255,255,1.0); }"
         )
-        set_button_icon(self.close_btn, "close_24dp_E3E3E3_FILL0_wght400_GRAD0_opsz24.svg", 12)
-        header_layout.addWidget(self.close_btn)
+        set_button_icon(
+            self.close_btn,
+            "close_24dp_E3E3E3_FILL0_wght400_GRAD0_opsz24.svg",
+            12,
+        )
+        self.close_btn.clicked.connect(self.hide)
 
-        self._content_layout.addLayout(header_layout)
-
-    def _build_main_content(self):
-        """Build drawer and prompt panel, assemble layout."""
-        # -- Drawer frame (stretch=1: absorbs all extra height) ---------------
-        self.drawer_frame = QFrame()
-        self.drawer_frame.setObjectName("chatDrawer")
-        self.drawer_frame.setStyleSheet("QFrame#chatDrawer { background: transparent; border: none; }")
-        self.drawer_layout = QVBoxLayout()
-        self.drawer_layout.setContentsMargins(0, 0, 0, 4)
-        self.drawer_layout.setSpacing(0)
-        self.drawer_frame.setLayout(self.drawer_layout)
-        self.drawer_frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.drawer_frame.setMinimumHeight(0)
+        # -- Drawer (child of content_widget, internal layout is fine) ------
+        self.drawer_frame = QFrame(self.content_widget)
+        self.drawer_frame.setStyleSheet(
+            "QFrame { background: transparent; border: none; }"
+        )
+        drawer_inner = QVBoxLayout(self.drawer_frame)
+        drawer_inner.setContentsMargins(0, 0, 0, 0)
+        drawer_inner.setSpacing(0)
 
         self.drawer_stack = QStackedWidget()
-        self.drawer_stack.setStyleSheet("QStackedWidget { background: transparent; border: none; }")
-
+        self.drawer_stack.setStyleSheet(
+            "QStackedWidget { background: transparent; border: none; }"
+        )
         self.result_widget = ResultWindow(
-            embedded=True,
-            show_chrome=False,
-            show_followup_input=False,
+            embedded=True, show_chrome=False, show_followup_input=False,
         )
         self.drawer_stack.addWidget(self.result_widget)
-
         self.history_widget = self._build_history_widget()
         self.drawer_stack.addWidget(self.history_widget)
-        self.drawer_layout.addWidget(self.drawer_stack)
+        drawer_inner.addWidget(self.drawer_stack)
 
-        # Start hidden — no height consumed
         self.drawer_frame.setVisible(False)
 
-        # -- Prompt panel (stretch=0: keeps its natural size) -----------------
+        # -- Prompt (child of content_widget) -------------------------------
         self.prompt_widget = MainPromptWindow(embedded=True, show_chrome=False)
-        self.prompt_widget.setObjectName("promptPanel")
-        self.result_widget.setObjectName("chatPanel")
-        self.drawer_frame.setObjectName("drawerFrame")
-        self.drawer_stack.setObjectName("drawerStack")
+        self.prompt_widget.setParent(self.content_widget)
 
-        self._content_layout.addWidget(self.drawer_frame, stretch=1)
-        self._content_layout.addWidget(self.prompt_widget, stretch=0)
-
-        self.content_widget.setLayout(self._content_layout)
-
-        container_stack = QStackedLayout()
-        container_stack.setContentsMargins(0, 0, 0, 0)
-        container_stack.setStackingMode(QStackedLayout.StackingMode.StackAll)
-        container_stack.addWidget(self.background_label)
-        container_stack.addWidget(self.content_widget)
-        self.container.setLayout(container_stack)
-
-        self._root_layout.addWidget(self.container)
-        self.setLayout(self._root_layout)
-
-    def _wire_signals(self):
-        """Connect widget signals to slots."""
-        self.close_btn.clicked.connect(self.hide)
+        # -- Signals --------------------------------------------------------
         self.prompt_widget.prompt_submitted.connect(self._on_prompt_submitted)
         self.prompt_widget.feature_triggered.connect(self.feature_triggered)
         self.prompt_widget.agent_selected.connect(self.agent_selected)
@@ -258,273 +199,230 @@ class PromptShellWindow(QWidget):
         self.result_widget.follow_up_submitted.connect(self.follow_up_submitted)
         self.result_widget.session_closed.connect(self.session_closed)
 
-    def _apply_initial_state(self):
-        """Set size, mask, background, and debug state."""
+        # -- Initial size ---------------------------------------------------
+        self._prompt_h = self.prompt_widget.window_height  # 200
+        self._collapsed_h = (
+            _MARGIN + _HEADER_H + _GAP + self._prompt_h + _MARGIN
+        )
         self.setMinimumSize(_MIN_WIDTH, _MIN_HEIGHT)
-        self.resize(self.prompt_widget.window_width, self.prompt_widget.window_height + 24)
-        self.adjustSize()
+        self.resize(self.prompt_widget.window_width, self._collapsed_h)
+        self._apply_geometry()
         self.update_window_mask()
         self.update_background_pixmap()
-        self._setup_ui_debugging()
 
-    # ── Debug helpers ────────────────────────────────────────────────────
+    # ── Manual geometry (the cure for jitter) ─────────────────────────────
 
-    def _is_debug_enabled(self) -> bool:
-        raw = os.environ.get("PROMPT_ANYWHERE_UI_DEBUG", "0").strip().lower()
-        return raw in {"1", "true", "on", "yes"}
+    def _apply_geometry(self) -> None:
+        """Position header / drawer / prompt by pixel math — no layout."""
+        w = self.content_widget.width()
 
-    def _setup_ui_debugging(self) -> None:
-        if not self._ui_debug_enabled:
-            return
-        print("[UI_DEBUG] PromptShellWindow debug mode enabled.")
+        # Header
+        self.title_label.setGeometry(_MARGIN + 2, _MARGIN, 200, _HEADER_H)
+        self.close_btn.setGeometry(w - _MARGIN - 22, _MARGIN, 20, 20)
 
-    def _debug(self, message: str) -> None:
-        if self._ui_debug_enabled:
-            print(f"[UI_DEBUG] {message}")
+        # Drawer
+        drawer_top = _MARGIN + _HEADER_H + _GAP
+        self.drawer_frame.setGeometry(
+            _MARGIN, drawer_top, w - 2 * _MARGIN, self._drawer_h
+        )
+        self.drawer_frame.setVisible(self._drawer_h > 0)
 
-    # ── Background / mask ────────────────────────────────────────────────
+        # Prompt (fills remaining space below drawer)
+        gap_after = _GAP if self._drawer_h > 0 else 0
+        prompt_top = drawer_top + self._drawer_h + gap_after
+        prompt_h = self.content_widget.height() - prompt_top - _MARGIN
+        self.prompt_widget.setGeometry(
+            _MARGIN, prompt_top, w - 2 * _MARGIN, max(prompt_h, 100)
+        )
 
-    def get_background_path(self) -> str:
-        return get_asset_path("background.png")
+    # ── Background / mask (expensive — skip during animation) ─────────────
 
     def update_background_pixmap(self) -> None:
         common_update_background_pixmap(
             self.background_label, self.background_pixmap, self.container.size()
         )
 
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self.update_window_mask()
-        self.update_background_pixmap()
-
     def update_window_mask(self) -> None:
         apply_rounded_mask(self, radius=16)
 
-    # ── Prompt submission ────────────────────────────────────────────────
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._apply_geometry()
+        if not self._animating:
+            self.update_window_mask()
+            self.update_background_pixmap()
 
-    def _on_prompt_submitted(self, prompt: str, image_bytes: object) -> None:
-        self.open_drawer(animated=True)
-        self.prompt_submitted.emit(prompt, image_bytes)
-
-    # ── Drawer open / close (geometry-based) ─────────────────────────────
+    # ── Drawer open / close ───────────────────────────────────────────────
 
     def is_drawer_open(self) -> bool:
         return self._drawer_open
 
     def toggle_drawer(self, animated: bool = True) -> None:
         if self._drawer_open:
-            self.close_drawer(animated=animated)
+            self.close_drawer(animated)
         else:
-            self.open_drawer(animated=animated)
+            self.open_drawer(animated)
 
     def open_drawer(self, animated: bool = True) -> None:
-        """Open the chat drawer by expanding the window upward."""
         if self._drawer_open:
             return
         self._drawer_open = True
-
-        # Anchor bottom edge
-        self._bottom_anchor = self.y() + self.height()
-        collapsed_h = self.height()
-        expanded_h = collapsed_h + self._drawer_open_height
-
-        # Make drawer visible (it will get space as window grows)
-        self.drawer_frame.setVisible(True)
-
-        self._debug(
-            f"open_drawer: collapsed={collapsed_h} expanded={expanded_h} "
-            f"anchor={self._bottom_anchor}"
-        )
+        target = self._drawer_open_height
 
         if not animated:
-            self.setGeometry(
-                self.x(),
-                self._bottom_anchor - expanded_h,
-                self.width(),
-                expanded_h,
-            )
-            self._bottom_anchor = None
+            self._set_drawer_height(target, resize_window=True)
+            self.update_window_mask()
+            self.update_background_pixmap()
             return
 
-        self._start_height_anim(collapsed_h, expanded_h)
+        self._animating = True
+        self._run_drawer_anim(self._drawer_h, target)
 
     def close_drawer(self, animated: bool = True) -> None:
-        """Close the chat drawer by shrinking the window downward."""
         if not self._drawer_open:
             return
         self._drawer_open = False
 
-        self._bottom_anchor = self.y() + self.height()
-        expanded_h = self.height()
-        collapsed_h = max(_MIN_HEIGHT, expanded_h - self._drawer_open_height)
-
-        self._debug(
-            f"close_drawer: expanded={expanded_h} collapsed={collapsed_h} "
-            f"anchor={self._bottom_anchor}"
-        )
-
         if not animated:
+            self._set_drawer_height(0, resize_window=True)
             self.drawer_frame.setVisible(False)
-            self.setGeometry(
-                self.x(),
-                self._bottom_anchor - collapsed_h,
-                self.width(),
-                collapsed_h,
-            )
-            self._bottom_anchor = None
+            self.update_window_mask()
+            self.update_background_pixmap()
             return
 
-        self._start_height_anim(expanded_h, collapsed_h, hide_drawer_on_done=True)
+        self._animating = True
+        self._run_drawer_anim(self._drawer_h, 0, hide_on_done=True)
 
-    def _start_height_anim(
-        self,
-        start_h: int,
-        end_h: int,
-        hide_drawer_on_done: bool = False,
+    def _run_drawer_anim(
+        self, start: int, end: int, hide_on_done: bool = False
     ) -> None:
-        """Animate window height between two values, keeping bottom edge fixed."""
         if self._drawer_anim is not None:
             self._drawer_anim.stop()
-            self._drawer_anim = None
 
-        anim = QVariantAnimation()
+        anim = QVariantAnimation(self)
         anim.setDuration(_ANIM_DURATION_MS)
         anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        anim.setStartValue(start_h)
-        anim.setEndValue(end_h)
-        anim.valueChanged.connect(self._on_height_anim_tick)
+        anim.setStartValue(start)
+        anim.setEndValue(end)
+        anim.valueChanged.connect(
+            lambda v: self._set_drawer_height(int(v), resize_window=True)
+        )
 
         def on_finished() -> None:
-            if hide_drawer_on_done:
+            self._set_drawer_height(end, resize_window=True)
+            if hide_on_done:
                 self.drawer_frame.setVisible(False)
-            self._bottom_anchor = None
+            self._animating = False
             self._drawer_anim = None
+            self.update_window_mask()
+            self.update_background_pixmap()
 
         anim.finished.connect(on_finished)
         self._drawer_anim = anim
         anim.start()
 
-    def _on_height_anim_tick(self, value) -> None:
-        """Single setGeometry per frame — no layout manipulation."""
-        h = int(value)
-        if self._bottom_anchor is not None:
-            self.setGeometry(self.x(), self._bottom_anchor - h, self.width(), h)
+    def _set_drawer_height(self, value: int, resize_window: bool) -> None:
+        """Core of the animation — mirrors the probe exactly."""
+        bottom = self.y() + self.height()
+        self._drawer_h = max(0, value)
+        if resize_window:
+            extra = self._drawer_h + (_GAP if self._drawer_h > 0 else 0)
+            new_h = self._collapsed_h + extra
+            self.setGeometry(self.x(), bottom - new_h, self.width(), new_h)
+        self._apply_geometry()
 
-    # ── Resize handles ───────────────────────────────────────────────────
+    # ── Prompt submission ─────────────────────────────────────────────────
+
+    def _on_prompt_submitted(self, prompt: str, image_bytes: object) -> None:
+        self.open_drawer(animated=True)
+        self.prompt_submitted.emit(prompt, image_bytes)
+
+    # ── Resize handles ────────────────────────────────────────────────────
 
     @staticmethod
-    def _get_resize_edge(pos, rect_size) -> str | None:
-        """Detect which edge/corner the mouse is on (or None)."""
-        grip = _RESIZE_GRIP
-        x, y = pos.x(), pos.y()
-        w, h = rect_size.width(), rect_size.height()
-
-        on_top = y <= grip
-        on_bottom = y >= h - grip
-        on_left = x <= grip
-        on_right = x >= w - grip
-
-        if on_top and on_left:
-            return "top-left"
-        if on_top and on_right:
-            return "top-right"
-        if on_bottom and on_left:
-            return "bottom-left"
-        if on_bottom and on_right:
-            return "bottom-right"
-        if on_top:
-            return "top"
-        if on_bottom:
-            return "bottom"
-        if on_left:
-            return "left"
-        if on_right:
-            return "right"
+    def _get_resize_edge(pos, size) -> Optional[str]:
+        g = _RESIZE_GRIP
+        x, y, w, h = pos.x(), pos.y(), size.width(), size.height()
+        top = y <= g
+        bot = y >= h - g
+        lft = x <= g
+        rgt = x >= w - g
+        if top and lft: return "top-left"
+        if top and rgt: return "top-right"
+        if bot and lft: return "bottom-left"
+        if bot and rgt: return "bottom-right"
+        if top: return "top"
+        if bot: return "bottom"
+        if lft: return "left"
+        if rgt: return "right"
         return None
 
-    def _apply_resize(self, global_pos) -> None:
-        """Update geometry while user drags a resize handle."""
+    def _apply_resize(self, gpos) -> None:
         if self._resize_edge is None or self._resize_start_geo is None:
             return
-
-        dx = global_pos.x() - self._resize_start_global.x()
-        dy = global_pos.y() - self._resize_start_global.y()
+        dx = gpos.x() - self._resize_start_global.x()
+        dy = gpos.y() - self._resize_start_global.y()
         geo = QRect(self._resize_start_geo)
-        edge = self._resize_edge
-
-        if "right" in edge:
-            geo.setRight(self._resize_start_geo.right() + dx)
-        if "left" in edge:
-            geo.setLeft(self._resize_start_geo.left() + dx)
-        if "bottom" in edge:
-            geo.setBottom(self._resize_start_geo.bottom() + dy)
-        if "top" in edge:
-            geo.setTop(self._resize_start_geo.top() + dy)
-
-        # Enforce minimum size
+        e = self._resize_edge
+        if "right" in e:  geo.setRight(self._resize_start_geo.right() + dx)
+        if "left" in e:   geo.setLeft(self._resize_start_geo.left() + dx)
+        if "bottom" in e: geo.setBottom(self._resize_start_geo.bottom() + dy)
+        if "top" in e:    geo.setTop(self._resize_start_geo.top() + dy)
         if geo.width() < _MIN_WIDTH:
-            if "left" in edge:
-                geo.setLeft(geo.right() - _MIN_WIDTH)
-            else:
-                geo.setRight(geo.left() + _MIN_WIDTH)
+            if "left" in e: geo.setLeft(geo.right() - _MIN_WIDTH)
+            else:           geo.setRight(geo.left() + _MIN_WIDTH)
         if geo.height() < _MIN_HEIGHT:
-            if "top" in edge:
-                geo.setTop(geo.bottom() - _MIN_HEIGHT)
-            else:
-                geo.setBottom(geo.top() + _MIN_HEIGHT)
-
+            if "top" in e: geo.setTop(geo.bottom() - _MIN_HEIGHT)
+            else:          geo.setBottom(geo.top() + _MIN_HEIGHT)
         self.setGeometry(geo)
 
-        # If the user dragged tall enough to show the drawer, auto-open it
-        prompt_h = self.prompt_widget.sizeHint().height()
-        available_for_drawer = self.height() - prompt_h - 34  # header + margins
-        if not self._drawer_open and available_for_drawer > 40:
+        # Auto-open drawer if user drags tall enough
+        avail = geo.height() - self._collapsed_h
+        if not self._drawer_open and avail > 40:
             self._drawer_open = True
-            self.drawer_frame.setVisible(True)
+            self._drawer_h = avail
+            self._apply_geometry()
 
-    # ── Mouse events (drag + resize) ─────────────────────────────────────
+    # ── Mouse events ──────────────────────────────────────────────────────
 
-    def mousePressEvent(self, event):
+    def mousePressEvent(self, event) -> None:
         if event.button() != Qt.MouseButton.LeftButton:
             return super().mousePressEvent(event)
-
         edge = self._get_resize_edge(event.position().toPoint(), self.size())
         if edge:
-            # Start resize
             self._resize_edge = edge
             self._resize_start_global = event.globalPosition().toPoint()
             self._resize_start_geo = QRect(self.geometry())
             event.accept()
             return
-
-        # Start drag
-        self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+        self._drag_pos = (
+            event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+        )
         event.accept()
 
-    def mouseMoveEvent(self, event):
-        # Active resize
-        if self._resize_edge is not None and event.buttons() == Qt.MouseButton.LeftButton:
+    def mouseMoveEvent(self, event) -> None:
+        if (
+            self._resize_edge is not None
+            and event.buttons() == Qt.MouseButton.LeftButton
+        ):
             self._apply_resize(event.globalPosition().toPoint())
             event.accept()
             return
-
-        # Active drag
-        if event.buttons() == Qt.MouseButton.LeftButton and self._drag_pos is not None:
+        if (
+            event.buttons() == Qt.MouseButton.LeftButton
+            and self._drag_pos is not None
+        ):
             self.move(event.globalPosition().toPoint() - self._drag_pos)
             event.accept()
             return
-
-        # Hover: update cursor for resize handles
         if event.buttons() == Qt.MouseButton.NoButton:
-            edge = self._get_resize_edge(event.position().toPoint(), self.size())
-            if edge:
-                self.setCursor(_EDGE_CURSORS[edge])
-            else:
-                self.unsetCursor()
-
+            edge = self._get_resize_edge(
+                event.position().toPoint(), self.size()
+            )
+            self.setCursor(_EDGE_CURSORS[edge]) if edge else self.unsetCursor()
         super().mouseMoveEvent(event)
 
-    def mouseReleaseEvent(self, event):
+    def mouseReleaseEvent(self, event) -> None:
         if self._resize_edge is not None:
             self._resize_edge = None
             self._resize_start_global = None
@@ -534,146 +432,84 @@ class PromptShellWindow(QWidget):
         self._drag_pos = None
         super().mouseReleaseEvent(event)
 
-    # ── Forwarded widget API ─────────────────────────────────────────────
+    # ── Forwarded widget API ──────────────────────────────────────────────
 
     def focus_input(self) -> None:
         self.prompt_widget.input_field.setFocus()
 
-    def set_available_agents(self, agent_names: list[str]) -> None:
-        self.prompt_widget.set_available_agents(agent_names)
+    def set_available_agents(self, agents: list[str]) -> None:
+        self.prompt_widget.set_available_agents(agents)
 
-    def set_selected_agent(self, agent_name: str) -> None:
-        self.prompt_widget.set_selected_agent(agent_name)
+    def set_selected_agent(self, name: str) -> None:
+        self.prompt_widget.set_selected_agent(name)
 
     def set_streaming_state(self, active: bool) -> None:
         self.prompt_widget.set_streaming_state(active)
 
-    # ── History panel ────────────────────────────────────────────────────
+    # ── History panel ─────────────────────────────────────────────────────
 
     def _build_history_widget(self) -> QWidget:
-        """Create in-drawer history panel."""
         panel = QWidget()
-        layout = QVBoxLayout()
-        layout.setContentsMargins(6, 4, 6, 6)
-        layout.setSpacing(6)
+        lay = QVBoxLayout(panel)
+        lay.setContentsMargins(6, 4, 6, 6)
+        lay.setSpacing(6)
 
-        header = QHBoxLayout()
-        header.setContentsMargins(7, 5, 0, 0)
-        header.setSpacing(6)
+        hdr = QVBoxLayout()
+        hdr.setContentsMargins(7, 5, 0, 0)
 
         back_btn = QPushButton("Back")
         back_btn.setFixedHeight(24)
         back_btn.setStyleSheet(
-            """
-            QPushButton {
-                background-color: rgba(50, 50, 50, 150);
-                color: rgba(255, 255, 255, 0.9);
-                border: 1px solid rgba(255, 255, 255, 0.15);
-                border-radius: 6px;
-                font-size: 8pt;
-                padding: 2px 10px;
-            }
-            QPushButton:hover {
-                background-color: rgba(70, 70, 70, 180);
-            }
-            """
+            "QPushButton { background: rgba(50,50,50,150);"
+            " color: rgba(255,255,255,0.9);"
+            " border: 1px solid rgba(255,255,255,0.15);"
+            " border-radius: 6px; font-size: 8pt; padding: 2px 10px; }"
+            " QPushButton:hover { background: rgba(70,70,70,180); }"
         )
-        back_btn.clicked.connect(lambda _checked=False: self.exit_history_mode(animated=True))
-        header.addWidget(back_btn)
+        back_btn.clicked.connect(
+            lambda _=False: self.exit_history_mode(animated=True)
+        )
+        hdr.addWidget(back_btn)
 
         title = QLabel("History")
         title.setStyleSheet(
-            """
-            QLabel {
-                color: #FF9D5C;
-                font-family: 'Segoe UI', sans-serif;
-                font-size: 11pt;
-                font-weight: bold;
-                background: transparent;
-                border: none;
-            }
-            """
+            "QLabel { color: #FF9D5C; font-family: 'Segoe UI', sans-serif;"
+            " font-size: 11pt; font-weight: bold; background: transparent;"
+            " border: none; }"
         )
-        header.addWidget(title)
-        header.addStretch()
-        layout.addLayout(header)
+        hdr.addWidget(title)
+        lay.addLayout(hdr)
 
         self.history_list = QListWidget()
         self.history_list.setWordWrap(True)
         self.history_list.setUniformItemSizes(False)
         self.history_list.setStyleSheet(
-            """
-            QListWidget {
-                background-color: rgba(22, 22, 22, 230);
-                color: #FFFFFF;
-                border: 1px solid rgba(255, 157, 92, 0.3);
-                border-radius: 6px;
-                padding: 6px;
-                font-family: 'Segoe UI', sans-serif;
-                font-size: 9pt;
-            }
-            QListWidget::item {
-                padding: 6px 4px;
-            }
-            QListWidget::item:selected {
-                background-color: rgba(255, 157, 92, 0.2);
-                border-radius: 4px;
-            }
-            """
+            "QListWidget { background: rgba(22,22,22,230); color: #FFF;"
+            " border: 1px solid rgba(255,157,92,0.3); border-radius: 6px;"
+            " padding: 6px; font-size: 9pt; }"
+            " QListWidget::item { padding: 6px 4px; }"
+            " QListWidget::item:selected {"
+            " background: rgba(255,157,92,0.2); border-radius: 4px; }"
         )
         self.history_list.itemClicked.connect(self._on_history_item_clicked)
-        layout.addWidget(self.history_list, stretch=1)
-
-        panel.setLayout(layout)
+        lay.addWidget(self.history_list, stretch=1)
         return panel
 
     def set_history_sessions(self, sessions: list[dict]) -> None:
         self.history_list.clear()
-        sorted_sessions = sorted(
+        for s in sorted(
             sessions,
-            key=lambda s: self._session_sort_key(s),
+            key=lambda s: self._parse_ts(
+                s.get("updated_at") or s.get("created_at") or ""
+            ) or datetime.min,
             reverse=True,
-        )
-        for session in sorted_sessions:
-            msg_count = len(session.get("messages", []))
-            ts_raw = session.get("updated_at") or session.get("created_at") or ""
-            timestamp = self._format_session_timestamp(ts_raw)
-            preview = self._session_preview(session)
-            label = f"{timestamp}  ({msg_count} messages)\n{preview}"
-            item = QListWidgetItem(label)
-            item.setData(Qt.ItemDataRole.UserRole, session.get("id"))
+        ):
+            n = len(s.get("messages", []))
+            ts = self._fmt_ts(s.get("updated_at") or s.get("created_at") or "")
+            preview = self._preview(s)
+            item = QListWidgetItem(f"{ts}  ({n} messages)\n{preview}")
+            item.setData(Qt.ItemDataRole.UserRole, s.get("id"))
             self.history_list.addItem(item)
-
-    def _session_sort_key(self, session: dict) -> datetime:
-        ts_raw = session.get("updated_at") or session.get("created_at") or ""
-        parsed = self._parse_session_datetime(ts_raw)
-        return parsed if parsed is not None else datetime.min
-
-    def _parse_session_datetime(self, raw_value: str) -> datetime | None:
-        if not raw_value:
-            return None
-        try:
-            return datetime.fromisoformat(str(raw_value))
-        except ValueError:
-            return None
-
-    def _format_session_timestamp(self, raw_value: str) -> str:
-        parsed = self._parse_session_datetime(raw_value)
-        if parsed is None:
-            return str(raw_value) if raw_value else "Unknown time"
-        return parsed.strftime("%b %d, %Y %I:%M %p")
-
-    def _session_preview(self, session: dict) -> str:
-        messages = session.get("messages", [])
-        first_user = ""
-        for entry in messages:
-            if entry.get("role") == "user":
-                first_user = (entry.get("content") or "").strip()
-                break
-        if not first_user:
-            return "No prompt preview"
-        compact = " ".join(first_user.split())
-        return f"{compact[:87]}..." if len(compact) > 90 else compact
 
     def show_history_mode(self, animated: bool = True) -> None:
         if self.drawer_stack.currentWidget() is self.history_widget:
@@ -696,20 +532,44 @@ class PromptShellWindow(QWidget):
         self._history_return_target = "chat"
 
     def _on_history_item_clicked(self, item: QListWidgetItem) -> None:
-        session_id = item.data(Qt.ItemDataRole.UserRole)
-        if not session_id:
+        sid = item.data(Qt.ItemDataRole.UserRole)
+        if not sid:
             return
         self._history_return_target = "chat"
-        self.history_session_selected.emit(session_id)
+        self.history_session_selected.emit(sid)
         self.show_chat_mode()
 
-    # ── Keyboard ─────────────────────────────────────────────────────────
+    # ── Timestamp helpers ─────────────────────────────────────────────────
 
-    def closeEvent(self, event):
+    @staticmethod
+    def _parse_ts(raw: str) -> Optional[datetime]:
+        if not raw:
+            return None
+        try:
+            return datetime.fromisoformat(str(raw))
+        except ValueError:
+            return None
+
+    @classmethod
+    def _fmt_ts(cls, raw: str) -> str:
+        dt = cls._parse_ts(raw)
+        return dt.strftime("%b %d, %Y %I:%M %p") if dt else (raw or "Unknown")
+
+    @staticmethod
+    def _preview(session: dict) -> str:
+        for e in session.get("messages", []):
+            if e.get("role") == "user":
+                t = " ".join((e.get("content") or "").split())
+                return (t[:87] + "...") if len(t) > 90 else t
+        return "No prompt preview"
+
+    # ── Keyboard ──────────────────────────────────────────────────────────
+
+    def closeEvent(self, event) -> None:
         self.hide()
         event.ignore()
 
-    def keyPressEvent(self, event):
+    def keyPressEvent(self, event) -> None:
         if event.key() == Qt.Key.Key_Escape:
             if self._drawer_open:
                 if self.drawer_stack.currentWidget() is self.history_widget:
