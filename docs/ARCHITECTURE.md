@@ -12,23 +12,21 @@ Concise overview of project structure and class roles. See [AGENTS.md](../AGENTS
 | `src/prompt_anywhere/core/` | Pure Python logic only. No Qt. |
 | `src/prompt_anywhere/ui/` | PySide6 GUI. May import from `core/`, never the reverse. |
 | `src/prompt_anywhere/common/` | Shared models (UIâ†”host contract). |
-| `src/prompt_anywhere/host/` | Local Agent Host (FastAPI); optional. |
+| `src/prompt_anywhere/host/` | Local CopeNet Host (FastAPI + WebSocket RPC). |
 
 ---
 
 ## Core (`src/prompt_anywhere/core/`)
 
 ### Coordinator
-- **App** (`app.py`) â€” Business-logic coordinator. Holds `Config`, `HotkeyManager`, default `BaseAgent` (e.g. Gemini). Registers global hotkey and exposes `get_agent()`.
+- **App** (`app.py`) â€” Business-logic coordinator. Holds `Config` + `HotkeyManager` and tracks selected model key for UI/gateway routing.
 
 ### Config & hotkeys
 - **Config** (`config.py`) â€” Load/save JSON config from `~/.prompt_anywhere/` (hotkey, default_agent, theme).
 - **HotkeyManager** (`hotkey_manager.py`) â€” Registers Ctrl+Alt+X via pynput; invokes callback on press (must be thread-safe).
 
 ### Agents (`core/agents/`)
-- **BaseAgent** â€” Abstract: `name`, `send_prompt(prompt, context) -> Iterator[str]`.
-- **GeminiAgent** â€” Streams via Gemini CLI subprocess; supports image context (temp file). Windows: `gemini.cmd`.
-- **ClaudeAgent** / **CodexAgent** â€” Placeholder stubs.
+- Legacy direct-CLI agent wrappers. CopeNet execution now runs through `core/providers/*` + `core/orchestrator.py`.
 
 ### Features (`core/features/`)
 - **BaseFeature** â€” Abstract: `name`, `icon`, `hotkey`, `execute(prompt) -> str`.
@@ -49,9 +47,9 @@ Concise overview of project structure and class roles. See [AGENTS.md](../AGENTS
 ## UI (`src/prompt_anywhere/ui/`)
 
 ### Coordinator
-- **PromptAnywhereApp** (`app.py`) â€” GUI coordinator. Creates `QApplication`, system tray, owns `PromptShellWindow` and `HistoryWindow`. Instantiates core `App` and all features; connects hotkey signal to `show_prompt_window`; runs agent in **AgentWorker** thread and wires **StreamSignals** to chat widget.
+- **PromptAnywhereApp** (`app.py`) â€” GUI coordinator. Creates `QApplication`, system tray, owns `PromptShellWindow` and `HistoryWindow`. Instantiates core `App` and all features; connects hotkey signal to `show_prompt_window`; runs gateway streaming in **GatewayWorker** and wires **StreamSignals** to chat widget.
 - **StreamSignals** â€” `text_chunk`, `finished`, `error`.
-- **AgentWorker** â€” Thread: calls `agent.send_prompt()`, emits chunks via StreamSignals.
+- **GatewayWorker** â€” Thread: calls `GatewayClient.stream_chat()` and emits chat deltas via StreamSignals.
 - **HotkeySignals** â€” `triggered`; used to invoke show_prompt from hotkey thread.
 
 ### Common (`ui/common/`)
@@ -62,7 +60,7 @@ Shared UI utilities used by the main windows (no duplicated asset/background/mas
 
 ### Services (`ui/services/`)
 UI-facing services; isolates I/O from widgets.
-- **session_manager** â€” `get_history_path()`, `load_sessions(path)`, `save_session(path, session_payload)`, `load_session_by_id(path, session_id)`. Used by **ResultWindow** for chat history persistence (`~/.prompt_anywhere/chat_sessions.json`).
+- **session_manager** â€” `get_history_path()`, `load_sessions(path)`, `save_session(path, session_payload)`, `load_session_by_id(path, session_id)`. Used by **ResultWindow** to read CopeNet session/transcript stores (`~/.prompt_anywhere/sessions/index.json` + `*.jsonl`); legacy write path is disabled.
 
 ### Windows (`ui/windows/`)
 Main windows use `setup_ui()` split into: `_build_container()`, `_build_header()`, `_build_main_content()`, `_wire_signals()`, `_apply_initial_state()`. They rely on `ui/common` for assets, background, and rounded mask.
@@ -94,14 +92,14 @@ Main windows use `setup_ui()` split into: `_build_container()`, `_build_header()
 ## Host (`src/prompt_anywhere/host/`)
 
 - **create_app()** (`api.py`) â€” FastAPI app: `/health`, `/v1/agents/prewarm` (stub).
-- **main** (`main.py`) â€” Host process entry (if run as separate service).
+- **main** (`main.py`) â€” Host process entry for CopeNet gateway runtime.
 
 ---
 
 ## Data flow (summary)
 
 1. Hotkey (pynput) â†’ HotkeyManager callback â†’ HotkeySignals.triggered â†’ `show_prompt_window()`.
-2. User submits prompt in MainPromptWindow â†’ PromptShellWindow â†’ `process_prompt()` â†’ AgentWorker runs `agent.send_prompt()` â†’ StreamSignals â†’ ResultWindow chat (append_text / set_finished / show_error).
+2. User submits prompt in MainPromptWindow â†’ PromptShellWindow â†’ `process_prompt()` â†’ GatewayWorker calls `GatewayClient.stream_chat()` â†’ WS `chat.send`/`chat` events â†’ StreamSignals â†’ ResultWindow chat (append_text / set_finished / show_error).
 3. Feature button â†’ `handle_feature()` â†’ `feature.execute(prompt)`; special results (`maximize_window`, `open_customize`, history) handled in GUI.
 
 ---
@@ -110,10 +108,10 @@ Main windows use `setup_ui()` split into: `_build_container()`, `_build_header()
 
 This section tracks migration from the legacy direct-UI agent flow to a local CopeNet gateway flow.
 
-### Current State (legacy path still active in UI)
+### Current State (gateway-only execution path)
 
-- UI still calls core agents directly via `AgentWorker`.
-- Session history for UI is still managed by `ui/services/session_manager.py`.
+- UI sends chat turns through `GatewayClient` only.
+- Session history for UI is sourced from CopeNet stores through `ui/services/session_manager.py`.
 - Host process exists, and now includes a WS RPC entry point.
 
 ### New CopeNet Modules Added
@@ -151,7 +149,7 @@ Implemented:
 
 Remaining:
 
-- UI migration to consume WS gateway (`GatewayClient`) instead of direct `AgentWorker` (partial: Codex path wired, non-Codex + image path still fallback).
+- Provider expansion for UI model selector (currently only Codex is mapped in CopeNet).
 - Persisted idempotency cache policy (current is in-memory).
 - Claude provider discovery and adapter.
 - Gemini provider discovery and adapter.

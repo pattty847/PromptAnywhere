@@ -717,6 +717,11 @@ class MainPromptWindow(QWidget):
             return
         self._available_agents = filtered
         self._populate_agent_options()
+        self.model_combo.setEnabled(len(filtered) > 1)
+        if len(filtered) == 1:
+            self.model_combo.setToolTip("Only one gateway-backed model is currently available.")
+        else:
+            self.model_combo.setToolTip("")
 
     def current_agent(self) -> str:
         """Return currently selected agent key."""

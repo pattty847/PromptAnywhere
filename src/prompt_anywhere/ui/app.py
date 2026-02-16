@@ -2,11 +2,13 @@
 import os
 import sys
 import signal
-import time
 import asyncio
 import uuid
+import subprocess
 from typing import Optional
 from threading import Event, Thread
+from urllib.parse import urlsplit, urlunsplit
+from urllib.request import urlopen
 
 # Import pynput-dependent core before PySide6 to avoid shibokensupport/six conflict
 from prompt_anywhere.core.app import App
@@ -17,7 +19,6 @@ from PySide6.QtGui import QColor, QIcon, QPixmap, QCursor
 
 from prompt_anywhere.ui.windows.result_window import ResultWindow
 from prompt_anywhere.ui.windows.prompt_shell_window import PromptShellWindow
-from prompt_anywhere.core.agents.base_agent import BaseAgent
 from prompt_anywhere.ui.services import GatewayClient, GatewayConfig
 from prompt_anywhere.core.features import (
     GoogleSearchFeature, FileSearchFeature, BrowserFeature,
@@ -32,74 +33,6 @@ class StreamSignals(QObject):
     finished = Signal()
     error = Signal(str)
     run_started = Signal(str)
-
-
-class AgentWorker(Thread):
-    """Background thread for agent calls"""
-    
-    def __init__(self, agent: BaseAgent, prompt: str, image_bytes=None):
-        super().__init__(daemon=True)
-        self.agent = agent
-        self.prompt = prompt
-        self.image_bytes = image_bytes
-        self.signals = StreamSignals()
-        self._cancel_event = Event()
-
-    def stop(self):
-        """Request cancellation of the active agent stream."""
-        self._cancel_event.set()
-    
-    def run(self):
-        """Run agent in background thread"""
-        try:
-            context = {'cancel_event': self._cancel_event}
-            if self.image_bytes:
-                context['image_bytes'] = self.image_bytes
-            
-            # Stream response from agent
-            for chunk in self.agent.send_prompt(self.prompt, context):
-                if self._cancel_event.is_set():
-                    break
-                self.signals.text_chunk.emit(chunk)
-            
-            self.signals.finished.emit()
-        except Exception as e:
-            self.signals.error.emit(str(e))
-
-
-class MockAgentWorker(Thread):
-    """Background worker that streams fake text for UI iteration."""
-
-    def __init__(self, prompt: str, image_bytes=None):
-        super().__init__(daemon=True)
-        self.prompt = prompt
-        self.image_bytes = image_bytes
-        self.signals = StreamSignals()
-        self._cancel_event = Event()
-
-    def stop(self):
-        """Request cancellation of mock stream."""
-        self._cancel_event.set()
-
-    def run(self):
-        """Stream mock chunks that resemble real output pacing."""
-        try:
-            attachment_note = " with screenshot context" if self.image_bytes else ""
-            chunks = [
-                "Mock mode is enabled.\n\n",
-                f"I received your prompt{attachment_note}: ",
-                f"\"{self.prompt[:120]}\".\n\n",
-                "This is a simulated streaming response so you can test drawer layout, sizing, and animation quickly.\n\n",
-                "Disable Mock Response Mode from the tray menu when you want real agent output again.",
-            ]
-            for chunk in chunks:
-                if self._cancel_event.is_set():
-                    break
-                self.signals.text_chunk.emit(chunk)
-                time.sleep(0.08)
-            self.signals.finished.emit()
-        except Exception as e:
-            self.signals.error.emit(str(e))
 
 
 class GatewayWorker(Thread):
@@ -193,6 +126,9 @@ class HotkeySignals(QObject):
 
 class PromptAnywhereApp:
     """Main application coordinator"""
+    _AGENT_TO_PROVIDER = {
+        "codex": "codex-cli",
+    }
     
     def __init__(self):
         self.app = QApplication.instance() or QApplication(sys.argv)
@@ -202,12 +138,12 @@ class PromptAnywhereApp:
         self.worker: Optional[Thread] = None
         self.active_gateway_run_id: Optional[str] = None
         self.active_gateway_session_key: Optional[str] = None
-        self.mock_response_mode = self._is_mock_mode_enabled_by_default()
         self.gateway_mode = self._is_gateway_mode_enabled()
         self.gateway_client: Optional[GatewayClient] = self._create_gateway_client()
 
         # Initialize core app (pure Python)
         self.core_app = App()
+        self._enforce_gateway_agent_selection()
 
         # Initialize features
         self.features = {
@@ -229,13 +165,7 @@ class PromptAnywhereApp:
         self.core_app.register_hotkey(self._on_hotkey_triggered)
 
         self.setup_system_tray()
-        print(f"Mock response mode: {'ON' if self.mock_response_mode else 'OFF'}")
         print(f"Gateway mode: {'ON' if self.gateway_client is not None else 'OFF'}")
-
-    def _is_mock_mode_enabled_by_default(self) -> bool:
-        """Read mock mode from environment (defaults ON for UI iteration)."""
-        raw = os.environ.get("PROMPT_ANYWHERE_MOCK_MODE", "1").strip().lower()
-        return raw not in {"0", "false", "off", "no"}
 
     def _is_gateway_mode_enabled(self) -> bool:
         """Read gateway mode flag from env (defaults ON)."""
@@ -274,13 +204,14 @@ class PromptAnywhereApp:
         
         open_action = tray_menu.addAction("Open Prompt (Ctrl+Alt+X)")
         open_action.triggered.connect(self.show_prompt_window)
-        
+
         tray_menu.addSeparator()
 
-        self.mock_mode_action = tray_menu.addAction("Mock Response Mode")
-        self.mock_mode_action.setCheckable(True)
-        self.mock_mode_action.setChecked(self.mock_response_mode)
-        self.mock_mode_action.triggered.connect(self.on_mock_mode_toggled)
+        gateway_health_action = tray_menu.addAction("Gateway Health Check")
+        gateway_health_action.triggered.connect(self.on_gateway_health_check)
+
+        gateway_start_action = tray_menu.addAction("Start Gateway Host")
+        gateway_start_action.triggered.connect(self.on_gateway_start)
 
         tray_menu.addSeparator()
         
@@ -290,11 +221,6 @@ class PromptAnywhereApp:
         self.tray_icon.setContextMenu(tray_menu)
         self.tray_icon.activated.connect(self.on_tray_activated)
         self.tray_icon.show()
-
-    def on_mock_mode_toggled(self, checked: bool):
-        """Enable/disable fake streaming responses for UI testing."""
-        self.mock_response_mode = checked
-        print(f"Mock response mode set to: {'ON' if checked else 'OFF'}")
     
     def on_tray_activated(self, reason):
         """Handle tray icon clicks"""
@@ -313,7 +239,7 @@ class PromptAnywhereApp:
             self.shell_window.agent_selected.connect(self.on_agent_selected)
             self.shell_window.stop_requested.connect(self.stop_streaming)
 
-        self.shell_window.set_available_agents(self.core_app.list_supported_agents())
+        self.shell_window.set_available_agents(self._gateway_supported_agents())
         self.shell_window.set_selected_agent(self.core_app.get_current_agent_name())
 
         # Position near mouse cursor, clamped to screen edges
@@ -386,46 +312,45 @@ class PromptAnywhereApp:
         chat.ensure_session()
         self.shell_window.show_chat_mode()
 
-        history_prompt = chat.build_prompt_with_history(prompt)
         chat.add_user_message(prompt)
         chat.start_assistant_message()
         self.shell_window.open_drawer(animated=True)
         self.shell_window.set_streaming_state(True)
 
-        should_use_gateway = (
-            self.gateway_client is not None
-            and not self.mock_response_mode
-            and image_bytes is None
-            and self.core_app.get_current_agent_name() == "codex"
-        )
-
-        if should_use_gateway:
-            session_key = chat.session_id or "default"
-            self.active_gateway_session_key = session_key
-            self.active_gateway_run_id = None
-            self.worker = GatewayWorker(
-                client=self.gateway_client,
-                session_key=session_key,
-                prompt=prompt,
-                provider="codex-cli",
+        if self.gateway_client is None:
+            error_text = (
+                "Gateway mode is required. Start prompt-anywhere-host and set "
+                "PROMPT_ANYWHERE_USE_GATEWAY=1."
             )
-            self.worker.signals.run_started.connect(self.on_gateway_run_started)
-        elif self.mock_response_mode:
-            self.worker = MockAgentWorker(prompt, image_bytes)
-        else:
-            # Get agent from core app
-            try:
-                agent = self.core_app.get_agent()
-            except Exception as e:
-                error_text = str(e)
-                chat.show_error(error_text)
-                QMessageBox.critical(
-                    self.shell_window,
-                    "Agent Not Available",
-                    error_text,
-                )
-                return
-            self.worker = AgentWorker(agent, history_prompt, image_bytes)
+            chat.show_error(error_text)
+            self.shell_window.set_streaming_state(False)
+            QMessageBox.critical(self.shell_window, "Gateway Required", error_text)
+            return
+
+        if image_bytes is not None:
+            error_text = "Image attachments are not supported in gateway mode yet."
+            chat.show_error(error_text)
+            self.shell_window.set_streaming_state(False)
+            return
+
+        provider = self._provider_for_selected_agent()
+        if provider is None:
+            model_name = self.core_app.get_current_agent_name()
+            error_text = f"Model '{model_name}' is not wired to CopeNet yet."
+            chat.show_error(error_text)
+            self.shell_window.set_streaming_state(False)
+            return
+
+        session_key = chat.session_id or "default"
+        self.active_gateway_session_key = session_key
+        self.active_gateway_run_id = None
+        self.worker = GatewayWorker(
+            client=self.gateway_client,
+            session_key=session_key,
+            prompt=prompt,
+            provider=provider,
+        )
+        self.worker.signals.run_started.connect(self.on_gateway_run_started)
 
         chat = self.shell_window.result_widget
         self.worker.signals.text_chunk.connect(chat.append_text)
@@ -434,6 +359,76 @@ class PromptAnywhereApp:
         self.worker.signals.error.connect(chat.show_error)
         self.worker.signals.error.connect(self.on_stream_finished)
         self.worker.start()
+
+    def _provider_for_selected_agent(self) -> str | None:
+        """Map current model selection to CopeNet provider ids."""
+        model_name = self.core_app.get_current_agent_name().strip().lower()
+        return self._AGENT_TO_PROVIDER.get(model_name)
+
+    def _gateway_supported_agents(self) -> list[str]:
+        """Return model keys currently wired to CopeNet providers."""
+        return list(self._AGENT_TO_PROVIDER.keys())
+
+    def _enforce_gateway_agent_selection(self) -> None:
+        """Force config onto a gateway-supported model selection."""
+        current = self.core_app.get_current_agent_name().strip().lower()
+        supported = self._gateway_supported_agents()
+        if current in supported:
+            return
+        fallback = supported[0]
+        self.core_app.set_default_agent(fallback)
+        print(f"Gateway mode model lock: switched default model to '{fallback}'.")
+
+    def _gateway_health_url(self) -> str:
+        """Convert websocket gateway URL into HTTP /health URL."""
+        if self.gateway_client is None:
+            return "http://127.0.0.1:17123/health"
+        parts = urlsplit(self.gateway_client._config.url)
+        scheme = "https" if parts.scheme == "wss" else "http"
+        return urlunsplit((scheme, parts.netloc, "/health", "", ""))
+
+    def _is_gateway_healthy(self) -> tuple[bool, str]:
+        """Probe gateway /health endpoint."""
+        url = self._gateway_health_url()
+        try:
+            with urlopen(url, timeout=1.5) as resp:
+                status = int(getattr(resp, "status", 0))
+                if status == 200:
+                    return True, f"Gateway is healthy at {url}"
+                return False, f"Gateway health returned HTTP {status} at {url}"
+        except Exception as exc:
+            return False, f"Gateway health check failed at {url}: {exc}"
+
+    def on_gateway_health_check(self) -> None:
+        """Handle tray action for gateway liveness check."""
+        ok, message = self._is_gateway_healthy()
+        print(message)
+        if ok:
+            QMessageBox.information(self.shell_window, "Gateway Health", message)
+        else:
+            QMessageBox.warning(self.shell_window, "Gateway Health", message)
+
+    def on_gateway_start(self) -> None:
+        """Start gateway host process if health check is currently failing."""
+        ok, message = self._is_gateway_healthy()
+        if ok:
+            QMessageBox.information(self.shell_window, "Gateway Host", message)
+            return
+        try:
+            subprocess.Popen(
+                [sys.executable, "-m", "prompt_anywhere.host"],
+                creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self.shell_window, "Gateway Host", f"Failed to start host: {exc}")
+            return
+        QMessageBox.information(
+            self.shell_window,
+            "Gateway Host",
+            "Started gateway host process. Run Gateway Health Check in a second to confirm.",
+        )
 
     @Slot()
     def stop_streaming(self):
@@ -487,8 +482,16 @@ class PromptAnywhereApp:
     @Slot(str)
     def on_agent_selected(self, agent_name: str):
         """Switch active agent from compact model dropdown."""
+        normalized = str(agent_name).strip().lower()
+        if normalized not in self._gateway_supported_agents():
+            error_text = f"Model '{normalized}' is not wired to CopeNet yet."
+            print(f"Agent switch blocked: {error_text}")
+            if self.shell_window:
+                self.shell_window.set_selected_agent(self.core_app.get_current_agent_name())
+                QMessageBox.warning(self.shell_window, "Model Unavailable", error_text)
+            return
         try:
-            self.core_app.set_default_agent(agent_name)
+            self.core_app.set_default_agent(normalized)
         except Exception as e:
             error_text = str(e)
             print(f"Agent switch failed: {error_text}")

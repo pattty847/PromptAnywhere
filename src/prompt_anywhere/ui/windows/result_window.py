@@ -164,7 +164,7 @@ class ResultWindow(QWidget):
         if not self._show_chrome:
             return
         title_layout = QHBoxLayout()
-        title = QLabel("Gemini Response")
+        title = QLabel("Assistant Response")
         title.setStyleSheet(
             """
             QLabel {
@@ -468,19 +468,6 @@ class ResultWindow(QWidget):
                 last = entry.get("content") or ""
                 break
         copy_to_clipboard(last)
-
-    def build_prompt_with_history(self, new_prompt: str) -> str:
-        """Build a prompt including conversation history for context."""
-        if not self.session_conversation:
-            return new_prompt
-
-        lines = []
-        for entry in self.session_conversation:
-            role = "User" if entry["role"] == "user" else "Assistant"
-            lines.append(f"{role}: {entry['content']}")
-        lines.append(f"User: {new_prompt}")
-        lines.append("Assistant:")
-        return "\n".join(lines)
 
     # -- Code blocks ----------------------------------------------------------
 

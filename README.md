@@ -1,6 +1,6 @@
 # PromptAnywhere
 
-Global hotkey AI assistant powered by Codex/Gemini/Claude CLI. Press `Ctrl+Alt+X` anywhere on Windows to open a prompt window, ask questions, attach screenshots, and get instant AI responses.
+Global hotkey AI assistant powered by local CLI subscriptions. Press `Ctrl+Alt+X` anywhere on Windows to open a prompt window and stream answers.
 
 <p align="center">
   <img width="600" alt="image" src="https://github.com/user-attachments/assets/2dd66e7c-7cf3-4d3c-92ff-6de52114a9a4" />
@@ -11,14 +11,14 @@ Global hotkey AI assistant powered by Codex/Gemini/Claude CLI. Press `Ctrl+Alt+X
 
 ### Prerequisites
 
-1. **Install Gemini CLI**:
+1. **Install Codex CLI**:
    ```bash
-   npm install -g @google/generative-ai-cli
+   npm install -g @openai/codex
    ```
 
-2. **Configure Gemini CLI**:
+2. **Login with Codex CLI**:
    ```bash
-   gemini config
+   codex login
    ```
 
 ### Installation
@@ -35,20 +35,36 @@ pip install -e .
 
 ### Run
 
+Open two terminals:
+
+Terminal 1 (gateway host):
+```bash
+prompt-anywhere-host
+```
+
+Terminal 2 (UI):
 ```bash
 python -m prompt_anywhere
 ```
 
-Press `Ctrl+Alt+X` anywhere to open the prompt window.
+Then press `Ctrl+Alt+X` anywhere to open the prompt window.
+
+If the host is not running, use tray actions:
+- `Gateway Health Check`
+- `Start Gateway Host`
 
 ## Features
 
 - **Global hotkey**: `Ctrl+Alt+X` opens prompt window from anywhere
 - **Screenshot support**: Capture screen regions and attach to prompts
-- **Streaming responses**: Real-time Gemini CLI output
+- **Streaming responses**: Real-time CopeNet gateway output
 - **Follow-up questions**: Continue conversations in result window
 - **System tray**: Runs in background, accessible via tray icon
-- **No API costs**: Uses your existing Gemini subscription
+- **Subscription-backed**: Uses your existing CLI login/session
+
+History source:
+- `~/.prompt_anywhere/sessions/index.json`
+- `~/.prompt_anywhere/sessions/<sessionId>.jsonl`
 
 ## Usage
 
@@ -66,14 +82,23 @@ Press `Ctrl+Alt+X` anywhere to open the prompt window.
 
 - Python 3.10+
 - Windows (native, not WSL)
-- Gemini CLI installed and configured
+- Codex CLI installed and logged in
 - PySide6, pynput, Pillow
 
 ## Architecture
 
-Modular design with strict separation:
-- `src/code/`: Pure Python logic (agents, features, core)
-- `src/gui/`: Qt/PySide6 UI components
+Gateway-first design:
+- `src/prompt_anywhere/host/`: CopeNet WebSocket gateway
+- `src/prompt_anywhere/core/`: Orchestrator, provider adapters, session/transcript stores
+- `src/prompt_anywhere/ui/`: PySide6 client that streams through gateway
+
+## Gateway Settings
+
+Optional environment variables:
+
+- `PROMPT_ANYWHERE_USE_GATEWAY` (default `1`)
+- `PROMPT_ANYWHERE_GATEWAY_URL` (default `ws://127.0.0.1:17123/ws`)
+- `PROMPT_ANYWHERE_GATEWAY_TOKEN` (default `dev-token`)
 
 See [CLAUDE.md](CLAUDE.md) for detailed architecture and development guide.
 

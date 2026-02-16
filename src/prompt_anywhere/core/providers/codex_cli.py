@@ -28,12 +28,10 @@ class CodexCliProvider:
                 self._cli,
                 "exec",
                 "resume",
-                provider_session_id,
-                "--color",
-                "never",
-                "--sandbox",
-                "read-only",
+                "--json",
+                "--dangerously-bypass-approvals-and-sandbox",
                 "--skip-git-repo-check",
+                provider_session_id,
                 prompt,
             ]
 
@@ -107,4 +105,3 @@ class CodexCliProvider:
                     detail = event.stderr_tail.strip() or event.stdout_tail.strip() or "unknown codex error"
                     raise RuntimeError(f"Codex CLI failed (exit={event.returncode}): {detail}")
                 yield ProviderEvent(kind="final", provider_session_id=discovered_session_id)
-
