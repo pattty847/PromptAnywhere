@@ -4,7 +4,7 @@ Global hotkey AI assistant powered by local CLI subscriptions. Press `Ctrl+Alt+X
 
 <p align="center">
   <img width="600" alt="image" src="https://github.com/user-attachments/assets/2dd66e7c-7cf3-4d3c-92ff-6de52114a9a4" />
-  <img width="600" alt="image" src="https://github.com/user-attachments/assets/e9457d34-930c-42b2-8e91-b447d27355aa" />
+  <img width="600" height="597" alt="image" src="https://github.com/user-attachments/assets/e5a60843-72ee-42f9-bf05-677407aad50b" />
 </p>
 
 ## Quick Start
