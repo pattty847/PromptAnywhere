@@ -6,10 +6,13 @@ from prompt_anywhere.ui.services.session_manager import (
     load_sessions,
     save_session,
 )
+from prompt_anywhere.ui.services.gateway_client import GatewayClient, GatewayConfig
 
 __all__ = [
     "get_history_path",
     "load_sessions",
     "save_session",
     "load_session_by_id",
+    "GatewayClient",
+    "GatewayConfig",
 ]

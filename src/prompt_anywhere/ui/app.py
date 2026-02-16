@@ -3,6 +3,8 @@ import os
 import sys
 import signal
 import time
+import asyncio
+import uuid
 from typing import Optional
 from threading import Event, Thread
 
@@ -16,6 +18,7 @@ from PySide6.QtGui import QColor, QIcon, QPixmap, QCursor
 from prompt_anywhere.ui.windows.result_window import ResultWindow
 from prompt_anywhere.ui.windows.prompt_shell_window import PromptShellWindow
 from prompt_anywhere.core.agents.base_agent import BaseAgent
+from prompt_anywhere.ui.services import GatewayClient, GatewayConfig
 from prompt_anywhere.core.features import (
     GoogleSearchFeature, FileSearchFeature, BrowserFeature,
     TerminalFeature, MaximizeChatFeature, HistoryFeature,
@@ -28,6 +31,7 @@ class StreamSignals(QObject):
     text_chunk = Signal(str)
     finished = Signal()
     error = Signal(str)
+    run_started = Signal(str)
 
 
 class AgentWorker(Thread):
@@ -98,6 +102,90 @@ class MockAgentWorker(Thread):
             self.signals.error.emit(str(e))
 
 
+class GatewayWorker(Thread):
+    """Background thread that streams responses from CopeNet gateway."""
+
+    def __init__(
+        self,
+        client: GatewayClient,
+        session_key: str,
+        prompt: str,
+        provider: str,
+    ):
+        super().__init__(daemon=True)
+        self.client = client
+        self.session_key = session_key
+        self.prompt = prompt
+        self.provider = provider
+        self.signals = StreamSignals()
+        self._cancel_event = Event()
+        self._run_id = f"run-{uuid.uuid4().hex[:10]}"
+
+    @property
+    def run_id(self) -> str:
+        return self._run_id
+
+    def stop(self):
+        """Request cancellation and best-effort remote abort."""
+        self._cancel_event.set()
+
+        def _abort() -> None:
+            try:
+                asyncio.run(self.client.abort(session_key=self.session_key, run_id=self._run_id))
+            except Exception:
+                # Best-effort path; streaming thread will surface final state if available.
+                pass
+
+        Thread(target=_abort, daemon=True).start()
+
+    def run(self):
+        """Connect to gateway and stream chat events."""
+        try:
+            asyncio.run(self._run_async())
+        except Exception as e:
+            self.signals.error.emit(str(e))
+
+    async def _run_async(self) -> None:
+        terminal_emitted = False
+
+        async def on_started(run_id: str) -> None:
+            if run_id:
+                self._run_id = run_id
+            self.signals.run_started.emit(self._run_id)
+
+        async def on_event(payload: dict) -> None:
+            nonlocal terminal_emitted
+            if self._cancel_event.is_set():
+                return
+            state = str(payload.get("state") or "")
+            if state == "delta":
+                message = payload.get("message") or {}
+                if isinstance(message, dict):
+                    content = message.get("content")
+                    if isinstance(content, str) and content:
+                        self.signals.text_chunk.emit(content)
+            elif state == "error":
+                msg = str(payload.get("errorMessage") or "Unknown gateway error")
+                self.signals.error.emit(msg)
+                terminal_emitted = True
+            elif state in {"final", "aborted"}:
+                self.signals.finished.emit()
+                terminal_emitted = True
+
+        result = await self.client.stream_chat(
+            session_key=self.session_key,
+            message=self.prompt,
+            idempotency_key=self._run_id,
+            provider=self.provider,
+            on_event=on_event,
+            on_started=on_started,
+        )
+        if not terminal_emitted:
+            status = str((result or {}).get("status") or "")
+            if status in {"in_flight", "cached", "started", "ok"}:
+                self.signals.finished.emit()
+
+
 class HotkeySignals(QObject):
     """Signals for hotkey communication"""
     triggered = Signal()
@@ -112,7 +200,11 @@ class PromptAnywhereApp:
         self.shell_window: Optional[PromptShellWindow] = None
         self.result_window: Optional[ResultWindow] = None  # legacy (unused once drawer lands)
         self.worker: Optional[Thread] = None
+        self.active_gateway_run_id: Optional[str] = None
+        self.active_gateway_session_key: Optional[str] = None
         self.mock_response_mode = self._is_mock_mode_enabled_by_default()
+        self.gateway_mode = self._is_gateway_mode_enabled()
+        self.gateway_client: Optional[GatewayClient] = self._create_gateway_client()
 
         # Initialize core app (pure Python)
         self.core_app = App()
@@ -138,11 +230,29 @@ class PromptAnywhereApp:
 
         self.setup_system_tray()
         print(f"Mock response mode: {'ON' if self.mock_response_mode else 'OFF'}")
+        print(f"Gateway mode: {'ON' if self.gateway_client is not None else 'OFF'}")
 
     def _is_mock_mode_enabled_by_default(self) -> bool:
         """Read mock mode from environment (defaults ON for UI iteration)."""
         raw = os.environ.get("PROMPT_ANYWHERE_MOCK_MODE", "1").strip().lower()
         return raw not in {"0", "false", "off", "no"}
+
+    def _is_gateway_mode_enabled(self) -> bool:
+        """Read gateway mode flag from env (defaults ON)."""
+        raw = os.environ.get("PROMPT_ANYWHERE_USE_GATEWAY", "1").strip().lower()
+        return raw not in {"0", "false", "off", "no"}
+
+    def _create_gateway_client(self) -> Optional[GatewayClient]:
+        """Instantiate gateway client when enabled."""
+        if not self.gateway_mode:
+            return None
+        url = os.environ.get("PROMPT_ANYWHERE_GATEWAY_URL", "ws://127.0.0.1:17123/ws").strip()
+        token = os.environ.get("PROMPT_ANYWHERE_GATEWAY_TOKEN", "dev-token").strip()
+        try:
+            return GatewayClient(GatewayConfig(url=url, token=token))
+        except Exception as exc:
+            print(f"Gateway client disabled: {exc}")
+            return None
     
     def _on_hotkey_triggered(self):
         """Hotkey callback - must be thread-safe"""
@@ -282,7 +392,25 @@ class PromptAnywhereApp:
         self.shell_window.open_drawer(animated=True)
         self.shell_window.set_streaming_state(True)
 
-        if self.mock_response_mode:
+        should_use_gateway = (
+            self.gateway_client is not None
+            and not self.mock_response_mode
+            and image_bytes is None
+            and self.core_app.get_current_agent_name() == "codex"
+        )
+
+        if should_use_gateway:
+            session_key = chat.session_id or "default"
+            self.active_gateway_session_key = session_key
+            self.active_gateway_run_id = None
+            self.worker = GatewayWorker(
+                client=self.gateway_client,
+                session_key=session_key,
+                prompt=prompt,
+                provider="codex-cli",
+            )
+            self.worker.signals.run_started.connect(self.on_gateway_run_started)
+        elif self.mock_response_mode:
             self.worker = MockAgentWorker(prompt, image_bytes)
         else:
             # Get agent from core app
@@ -318,8 +446,14 @@ class PromptAnywhereApp:
     @Slot()
     def on_stream_finished(self):
         """Reset send/stop state once streaming completes or errors."""
+        self.active_gateway_run_id = None
         if self.shell_window:
             self.shell_window.set_streaming_state(False)
+
+    @Slot(str)
+    def on_gateway_run_started(self, run_id: str):
+        """Track gateway run id for aborts/debug."""
+        self.active_gateway_run_id = run_id
 
     def show_history_window(self):
         """Open history inside the shell drawer."""

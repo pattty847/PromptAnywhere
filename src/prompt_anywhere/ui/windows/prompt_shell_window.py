@@ -262,7 +262,6 @@ class PromptShellWindow(QWidget):
         """Set size, mask, background, and debug state."""
         self.setMinimumSize(_MIN_WIDTH, _MIN_HEIGHT)
         self.resize(self.prompt_widget.window_width, self.prompt_widget.window_height + 24)
-        self.adjustSize()
         self.update_window_mask()
         self.update_background_pixmap()
         self._setup_ui_debugging()

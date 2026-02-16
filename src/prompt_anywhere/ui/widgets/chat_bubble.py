@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QSizePolicy,
+    QTextEdit,
     QTextBrowser,
     QVBoxLayout,
 )
@@ -30,6 +31,7 @@ class _BubbleTextDisplay(QTextBrowser):
         self.setReadOnly(True)
         self.setOpenLinks(False)
         self.setOpenExternalLinks(False)
+        self.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setFrameShape(QFrame.Shape.NoFrame)
@@ -51,10 +53,16 @@ class _BubbleTextDisplay(QTextBrowser):
         self._update_height()
 
     def _update_height(self) -> None:
-        doc_height = self.document().size().toSize().height()
+        self.document().setTextWidth(max(0, self.viewport().width()))
+        self.document().adjustSize()
+        doc_height = int(self.document().documentLayout().documentSize().height())
         margins = self.contentsMargins()
         h = max(18, doc_height + margins.top() + margins.bottom())
         self.setFixedHeight(h)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_height()
 
 
 class ChatBubble(QFrame):
@@ -115,7 +123,6 @@ class ChatBubble(QFrame):
             self._copy_btn = QPushButton()
             self._copy_btn.setFixedSize(22, 22)
             self._copy_btn.setToolTip("Copy message")
-            self._copy_btn.setVisible(False)
             self._copy_btn.setStyleSheet(
                 """
                 QPushButton {
@@ -167,18 +174,6 @@ class ChatBubble(QFrame):
         """Replace the full message content."""
         self._content = text
         self._text_widget.setPlainText(text)
-
-    # -- Hover copy -----------------------------------------------------------
-
-    def enterEvent(self, event) -> None:
-        if self._copy_btn:
-            self._copy_btn.setVisible(True)
-        super().enterEvent(event)
-
-    def leaveEvent(self, event) -> None:
-        if self._copy_btn:
-            self._copy_btn.setVisible(False)
-        super().leaveEvent(event)
 
     def _copy_content(self) -> None:
         cb = QApplication.clipboard()
