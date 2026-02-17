@@ -8,6 +8,7 @@ Keep the app stable while extending features. This file is the execution guide f
 - GUI only in `src/prompt_anywhere/ui/`. UI may import from `core/`, never the reverse.
 - Preserve existing behavior. Ask before making breaking changes.
 - Windows-first: use `gemini.cmd`, handle Windows paths correctly.
+- Prefer high-signal validation over exhaustive validation. Run the smallest reliable check set first, then escalate only when needed.
 
 ## Repo Map (Key Paths)
 - `run_prompt_anywhere.py` / `python -m prompt_anywhere`: entry; calls `ui.app.main()`.
@@ -23,6 +24,20 @@ Keep the app stable while extending features. This file is the execution guide f
 - Threaded work uses a `Thread` plus Qt signals for GUI-safe updates.
 - No circular dependencies across layers.
 - Main windows (MainPromptWindow, ResultWindow, PromptShellWindow) use `setup_ui()` split into: `_build_container()`, `_build_header()`, `_build_main_content()`, `_wire_signals()`, `_apply_initial_state()`. Prefer reusing `ui/common` (assets, background, window_shape) over duplicating.
+
+## Validation Budget (Do Not Over-Test by Default)
+Run checks proportionally to risk and scope.
+
+1. Minimal pass (always):
+   - Format/lint only touched files.
+   - Run focused tests for the changed module/feature only.
+2. Escalate to broader tests when:
+   - Shared contracts changed (`core/app.py`, public interfaces, RPC schema).
+   - Session persistence changed.
+   - Cross-window UI behavior changed.
+3. Full app smoke pass is required before merge only for:
+   - New features crossing `core/` and `ui/`.
+   - Refactors affecting startup, hotkeys, capture, or streaming.
 
 ## When Adding an Agent
 1. Create class in `core/agents/`.
@@ -41,12 +56,39 @@ Keep the app stable while extending features. This file is the execution guide f
 2. Verify the hotkey thread is running.
 3. Confirm Gemini CLI is installed and configured.
 4. Check Windows-specific paths and `.cmd` usage.
+5. Reproduce with the smallest path (single widget/window) before app-wide checks.
 
 ## Code Quality
 - Type hints for function signatures.
 - Docstrings for classes and public methods.
 - Small, focused functions.
 - No Qt imports in `core/`.
+- Prefer readable, flattened conditionals over deeply nested `if` blocks.
+- Avoid single-use helper methods unless they significantly improve readability.
+- Prefer strict handling of known cases; do not hide behavior behind broad fallback branches.
+
+## Tooling Baseline
+- Python: use project formatter/linter on changed files before finalizing.
+- UI checks: validate changed widgets/windows with screenshot evidence when behavior is visual.
+- Keep style-enforcement automatic where possible; avoid relying on memory.
+
+## Change Triggers (If X Changes, Also Update Y)
+- If user-visible behavior changes, update docs in `docs/` (or add a short "no doc impact" note).
+- If setup/run behavior changes, update `docs/update/SETUP.md`.
+- If RPC request/response shapes change, update `src/prompt_anywhere/host/rpc_schema.py` and related docs/examples.
+- If session storage format/keys change, update session migration/compat logic and document backward-compat expectations.
+- If new feature flags/settings are added, update defaults, docs, and any persisted-session handling.
+- If logging behavior changes, ensure archive/log rotation impact is documented (if applicable).
+
+## UI Snapshot and Screenshot Verification
+- Any intentional UI change should include visual verification (snapshot or screenshot diff).
+- Use localhost screenshot tooling for window/widget validation when available.
+- Validate at least:
+  - Primary state,
+  - One alternate state (empty/loading/error/selected),
+  - High-DPI or zoom-sensitive rendering when relevant,
+  - Selection-region/full-window capture paths when capture code changes.
+- If snapshot updates are expected, review them before accepting to avoid accidental visual regressions.
 
 ## Smoke Tests (Manual)
 - App launches without errors.
@@ -56,6 +98,15 @@ Keep the app stable while extending features. This file is the execution guide f
 - System tray icon appears.
 - Rounded corners/background clipping correct.
 - No Qt imports in `core/`.
+
+## Ship Checklist
+Before finalizing a change, explicitly confirm:
+- [ ] Code changed only in the correct layer (`core/` vs `ui/`).
+- [ ] Required "If X -> update Y" items were handled.
+- [ ] Focused tests and smoke checks were run at the right scope.
+- [ ] Visual proof was captured for UI changes.
+- [ ] Docs were updated, or a "no doc impact" note was added.
+- [ ] Archive/logging impact reviewed when behavior touched logging/session persistence.
 
 ## Reminders
 Entry stays minimal and calls `ui.app.main()`. Session persistence lives in `ui/services/session_manager`; UI widgets call it, don’t re-implement file I/O in windows.

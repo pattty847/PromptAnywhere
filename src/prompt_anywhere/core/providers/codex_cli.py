@@ -18,7 +18,7 @@ class CodexCliProvider:
 
     def __init__(self, runner: CliRunner | None = None) -> None:
         self._runner = runner or CliRunner()
-        self._cli = shutil.which("codex.cmd") or shutil.which("codex")
+        self._cli = shutil.which("codex") or shutil.which("codex.cmd")
         if not self._cli:
             raise FileNotFoundError("Codex CLI not found on PATH (expected `codex` or `codex.cmd`).")
 

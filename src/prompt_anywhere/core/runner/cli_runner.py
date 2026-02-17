@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import subprocess
+import sys
 from typing import AsyncIterator, Sequence
 
 
@@ -41,13 +43,17 @@ class CliRunner:
             RunnerEvent for streamed lines and one final RunnerResult.
         """
 
-        process = await asyncio.create_subprocess_exec(
-            *argv,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=cwd,
-            env=env,
-        )
+        spawn_kwargs = {
+            "stdout": asyncio.subprocess.PIPE,
+            "stderr": asyncio.subprocess.PIPE,
+            "cwd": cwd,
+            "env": env,
+        }
+        if sys.platform == "win32":
+            # Hide transient console windows for per-turn CLI subprocesses.
+            spawn_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+        process = await asyncio.create_subprocess_exec(*argv, **spawn_kwargs)
 
         if process.stdout is None or process.stderr is None:
             raise RuntimeError("failed to create subprocess streams")
@@ -130,4 +136,3 @@ class CliRunner:
             stdout_tail="\n".join(stdout_tail),
             stderr_tail="\n".join(stderr_tail),
         )
-

@@ -314,6 +314,7 @@ class PromptAnywhereApp:
 
         chat.add_user_message(prompt)
         chat.start_assistant_message()
+        chat.set_loading_text("Connecting to gateway...")
         self.shell_window.open_drawer(animated=True)
         self.shell_window.set_streaming_state(True)
 
@@ -353,6 +354,7 @@ class PromptAnywhereApp:
         self.worker.signals.run_started.connect(self.on_gateway_run_started)
 
         chat = self.shell_window.result_widget
+        self.worker.signals.text_chunk.connect(self.on_stream_chunk)
         self.worker.signals.text_chunk.connect(chat.append_text)
         self.worker.signals.finished.connect(chat.set_finished)
         self.worker.signals.finished.connect(self.on_stream_finished)
@@ -415,9 +417,15 @@ class PromptAnywhereApp:
             QMessageBox.information(self.shell_window, "Gateway Host", message)
             return
         try:
+            creationflags = 0
+            if sys.platform == "win32":
+                creationflags = (
+                    getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                    | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                )
             subprocess.Popen(
                 [sys.executable, "-m", "prompt_anywhere.host"],
-                creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+                creationflags=creationflags,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -446,9 +454,17 @@ class PromptAnywhereApp:
             self.shell_window.set_streaming_state(False)
 
     @Slot(str)
+    def on_stream_chunk(self, _chunk: str):
+        """Update loading affordance once output begins streaming."""
+        if self.shell_window:
+            self.shell_window.result_widget.set_loading_text("Streaming response...")
+
+    @Slot(str)
     def on_gateway_run_started(self, run_id: str):
         """Track gateway run id for aborts/debug."""
         self.active_gateway_run_id = run_id
+        if self.shell_window:
+            self.shell_window.result_widget.set_loading_text("Thinking...")
 
     def show_history_window(self):
         """Open history inside the shell drawer."""

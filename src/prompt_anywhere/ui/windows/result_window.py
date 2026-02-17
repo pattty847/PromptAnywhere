@@ -565,7 +565,14 @@ class ResultWindow(QWidget):
     def set_loading(self, is_loading: bool) -> None:
         """Toggle loading indicator."""
         if hasattr(self, "loading_label"):
+            if not is_loading:
+                self.loading_label.setText("Loading...")
             self.loading_label.setVisible(is_loading)
+
+    def set_loading_text(self, text: str) -> None:
+        """Set loading indicator text while a run is active."""
+        if hasattr(self, "loading_label"):
+            self.loading_label.setText(text)
 
     def get_background_path(self) -> str:
         """Return the background image path."""
