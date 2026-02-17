@@ -47,6 +47,7 @@ class Config:
         return {
             "hotkey": "Ctrl+Alt+X",
             "default_agent": "codex",
+            "execution_mode": "tools-enabled",
             "theme": "default"
         }
     

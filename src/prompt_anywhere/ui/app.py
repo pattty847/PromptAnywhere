@@ -15,7 +15,7 @@ from prompt_anywhere.core.app import App
 
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QMessageBox
 from PySide6.QtCore import Qt, QObject, Signal, Slot, QTimer
-from PySide6.QtGui import QColor, QIcon, QPixmap, QCursor
+from PySide6.QtGui import QActionGroup, QColor, QIcon, QPixmap, QCursor
 
 from prompt_anywhere.ui.windows.result_window import ResultWindow
 from prompt_anywhere.ui.windows.prompt_shell_window import PromptShellWindow
@@ -129,6 +129,11 @@ class PromptAnywhereApp:
     _AGENT_TO_PROVIDER = {
         "codex": "codex-cli",
     }
+    _EXECUTION_MODE_LABELS = {
+        "safe": "Safe (Read-only)",
+        "tools-enabled": "Tools-enabled (Full Auto)",
+        "unrestricted": "Unrestricted",
+    }
     
     def __init__(self):
         self.app = QApplication.instance() or QApplication(sys.argv)
@@ -144,6 +149,7 @@ class PromptAnywhereApp:
         # Initialize core app (pure Python)
         self.core_app = App()
         self._enforce_gateway_agent_selection()
+        self._normalize_execution_mode()
 
         # Initialize features
         self.features = {
@@ -212,6 +218,19 @@ class PromptAnywhereApp:
 
         gateway_start_action = tray_menu.addAction("Start Gateway Host")
         gateway_start_action.triggered.connect(self.on_gateway_start)
+
+        execution_menu = tray_menu.addMenu("Execution Mode")
+        self._execution_mode_actions: dict[str, object] = {}
+        group = QActionGroup(execution_menu)
+        group.setExclusive(True)
+        active_mode = self._get_execution_mode()
+        for mode, label in self._EXECUTION_MODE_LABELS.items():
+            action = execution_menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(mode == active_mode)
+            action.triggered.connect(lambda checked=False, m=mode: self.on_execution_mode_selected(m))
+            group.addAction(action)
+            self._execution_mode_actions[mode] = action
 
         tray_menu.addSeparator()
         
@@ -437,6 +456,28 @@ class PromptAnywhereApp:
             "Gateway Host",
             "Started gateway host process. Run Gateway Health Check in a second to confirm.",
         )
+
+    def _get_execution_mode(self) -> str:
+        """Read and normalize execution mode from persisted config."""
+        raw = str(self.core_app.config.get("execution_mode", "tools-enabled")).strip().lower()
+        if raw in self._EXECUTION_MODE_LABELS:
+            return raw
+        return "tools-enabled"
+
+    def _normalize_execution_mode(self) -> None:
+        """Ensure execution mode has a valid persisted value."""
+        mode = self._get_execution_mode()
+        self.core_app.config.set("execution_mode", mode)
+
+    def on_execution_mode_selected(self, mode: str) -> None:
+        """Persist execution mode selected from tray menu."""
+        normalized = str(mode).strip().lower()
+        if normalized not in self._EXECUTION_MODE_LABELS:
+            return
+        self.core_app.config.set("execution_mode", normalized)
+        for key, action in self._execution_mode_actions.items():
+            action.setChecked(key == normalized)
+        print(f"Execution mode set to: {normalized}")
 
     @Slot()
     def stop_streaming(self):

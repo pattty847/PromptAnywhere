@@ -52,6 +52,7 @@ Then press `Ctrl+Alt+X` anywhere to open the prompt window.
 If the host is not running, use tray actions:
 - `Gateway Health Check`
 - `Start Gateway Host`
+- `Execution Mode` (`Safe`, `Tools-enabled`, `Unrestricted`)
 
 ## Features
 
